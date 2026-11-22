@@ -26,7 +26,7 @@ static int check(const char *want)
 static char *get(void)
 {
     char *s = (char *)malloc(4);
-    strcpy(s, "abc");
+    memcpy(s, "abc", 4); /* (no strcpy: the MSVC headers deprecate it) */
     return s;
 }
 
