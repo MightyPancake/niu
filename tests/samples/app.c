@@ -1,0 +1,26 @@
+/* A niu file: it includes <niu.h>. niu turns that line into a comment and
+ * copies everything else unchanged. */
+#include <stdio.h>
+#include <string.h>
+#include <niu.h> /* the opt-in */
+
+/* niu.h has an include guard, so including it twice is harmless. The odd
+ * spelling checks that the comment niu writes for it stays valid. */
+#   /* again */ include <niu.h>
+
+#define STR(x) #x
+#define XSTR(x) STR(x)
+
+static const char *const message = "ok";
+static const char tricky[] = "*/ /* not a comment */";
+
+int main(void)
+{
+	if (strlen(tricky) != 22)
+		return 1;
+	/* __NIU_STD__ is only defined while niu parses, not in the output */
+	if (strcmp(XSTR(__NIU_STD__), "__NIU_STD__") != 0)
+		return 1;
+	puts(message);
+	return 0;
+}

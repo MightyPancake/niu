@@ -1,0 +1,8 @@
+# Check sources out with LF everywhere, also on Windows, so that the shell
+# scripts run and the tests see the same bytes on every platform.
+* text=auto eol=lf
+
+# Test inputs and expected outputs are compared byte for byte; Git must never
+# convert their line endings (tests/samples/crlf.c is CRLF on purpose).
+tests/samples/** -text
+tests/expected/** -text

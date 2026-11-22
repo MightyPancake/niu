@@ -1,0 +1,7 @@
+/niu
+/niu.exe
+*.obj
+*.niu-tmp
+*.plain.c
+*.plain.h
+/result
