@@ -115,7 +115,8 @@ for name in $samples; do
 
     # --no-line: the same without line 2. This also replaces the file
     # written above, which niu may do because it generated it.
-    sed '2d' "$here/expected/$out" >"$d/expected-no-line"
+    # (head and tail, not sed: Git Bash's sed drops the CR of CRLF lines.)
+    { head -n 1 "$here/expected/$out"; tail -n +3 "$here/expected/$out"; } >"$d/expected-no-line"
     if (cd "$d" && "$niu" transpile --no-line -Wno-niu-plain-file "$name") >"$d/log" 2>&1 &&
         cmp "$d/$out" "$d/expected-no-line" >"$d/cmp" 2>&1; then
         pass "$name -> $out with --no-line (replacing niu's own file)"
