@@ -37,6 +37,10 @@
 #include "src/niu_h.c"
 #include "src/edits.c"
 #include "src/output.c"
+#include "src/lex.c"
+#include "src/prepass.c"
+#include "src/defer.c"
+#include "src/lower.c"
 #include "src/frontend.c"
 #include "src/cli.c"
 

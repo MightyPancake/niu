@@ -38,6 +38,12 @@ typedef struct {
     const void *data[3];
 } CXCursor;
 
+/* kind is an enum CXTypeKind. */
+typedef struct {
+    int kind;
+    void *data[2];
+} CXType;
+
 struct CXUnsavedFile {
     const char *Filename;
     const char *Contents;
@@ -106,7 +112,22 @@ typedef enum CXChildVisitResult (*CXCursorVisitor)(CXCursor cursor, CXCursor par
     X(CXFile, clang_getIncludedFile, (CXCursor))                                                                       \
     X(CXFile, clang_getFile, (CXTranslationUnit, const char *))                                                        \
     X(CXString, clang_getFileName, (CXFile))                                                                           \
-    X(int, clang_File_isEqual, (CXFile, CXFile))
+    X(int, clang_File_isEqual, (CXFile, CXFile))                                                                       \
+    X(void, clang_getExpansionLocation, (CXSourceLocation, CXFile *, unsigned *, unsigned *, unsigned *))             \
+    X(CXString, clang_getCursorSpelling, (CXCursor))                                                                   \
+    X(CXCursor, clang_getCursorReferenced, (CXCursor))                                                                 \
+    X(unsigned, clang_equalCursors, (CXCursor, CXCursor))                                                              \
+    X(int, clang_Cursor_isNull, (CXCursor))                                                                            \
+    X(unsigned, clang_isAttribute, (int))                                                                              \
+    X(CXType, clang_getCursorType, (CXCursor))                                                                         \
+    X(CXType, clang_getCursorResultType, (CXCursor))                                                                   \
+    X(CXType, clang_getUnqualifiedType, (CXType))                                                                      \
+    X(CXType, clang_getCanonicalType, (CXType))                                                                        \
+    X(CXString, clang_getTypeSpelling, (CXType))                                                                       \
+    X(unsigned, clang_equalTypes, (CXType, CXType))                                                                    \
+    X(int, clang_Cursor_getStorageClass, (CXCursor))                                                                   \
+    X(int, clang_getCursorTLSKind, (CXCursor))                                                                         \
+    X(const char *, clang_getFileContents, (CXTranslationUnit, CXFile, size_t *))
 
 /* Functions niu does not call (yet), but whose presence shows that the
  * library is at least LLVM 17. LLVM 18 added no C API functions, so the

@@ -10,6 +10,7 @@ typedef struct {
     int no_query_cc;        /* --no-query-cc */
     int warn_file_name;     /* -Wniu-file-name (on by default) */
     int warn_plain_file;    /* -Wniu-plain-file (on by default) */
+    int warn_empty_defer_now; /* -Wniu-empty-defer-now (on by default) */
     int verbose;            /* -v */
 } niu_options;
 
@@ -132,7 +133,11 @@ typedef struct {
     char *niu_h_path; /* its path inside the virtual directory */
     int is_niu_file;  /* the input includes <niu.h> itself */
     niu_strlist niu_headers; /* other files that include <niu.h> (not yet supported) */
-    niu_edits edits;
+    size_t niu_h_off;        /* where the input's `#include <niu.h>` is, or (size_t)-1 */
+    size_t *niu_h_ranges;    /* every `#include <niu.h>` in the input: begin, end, ... */
+    size_t n_niu_h;
+    niu_prepass pp;          /* the token pre-pass; pp.text is what libclang reads */
+    char *lowered;           /* the lowered text (without niu's header lines) */
     int errors;
 } niu_unit;
 
@@ -197,14 +202,23 @@ static void niu_print_diagnostic(CXDiagnostic d)
     }
 }
 
-/* Prints libclang's diagnostics; returns the number of errors. */
-static int niu_report_diagnostics(CXTranslationUnit tu)
+/* Prints libclang's diagnostics; returns the number of errors. A
+ * diagnostic on a niu keyword is left out: it is about the C the pre-pass
+ * put there, and niu reports what is wrong with the keyword itself. */
+static int niu_report_diagnostics(CXTranslationUnit tu, niu_prepass *pp, CXFile main_file)
 {
     unsigned i, n = cx.clang_getNumDiagnostics(tu);
     int errors = 0;
     for (i = 0; i < n; i++) {
         CXDiagnostic d = cx.clang_getDiagnostic(tu, i);
         int sev = cx.clang_getDiagnosticSeverity(d);
+        CXFile f = NULL;
+        unsigned line, col, off = 0;
+        cx.clang_getExpansionLocation(cx.clang_getDiagnosticLocation(d), &f, &line, &col, &off);
+        if (pp->n_markers && f && main_file && cx.clang_File_isEqual(f, main_file) && niu_marker_covering(pp, off)) {
+            cx.clang_disposeDiagnostic(d);
+            continue;
+        }
         if (sev == CXDiagnostic_Error || sev == CXDiagnostic_Fatal)
             errors++;
         niu_print_diagnostic(d);
@@ -264,8 +278,13 @@ static void niu_visit_include(niu_unit *u, CXCursor c)
         u->errors++;
         return;
     }
+    if (!u->is_niu_file)
+        u->niu_h_off = begin;
+    u->niu_h_ranges = (size_t *)niu_xrealloc(u->niu_h_ranges, (2 * u->n_niu_h + 2) * sizeof *u->niu_h_ranges);
+    u->niu_h_ranges[2 * u->n_niu_h] = begin;
+    u->niu_h_ranges[2 * u->n_niu_h + 1] = end;
+    u->n_niu_h++;
     u->is_niu_file = 1;
-    niu_edits_add(&u->edits, begin, end, niu_comment_out(u->src + begin, end - begin));
 }
 
 /* The walker. Preprocessing cursors (#include) are top-level children of the
@@ -285,24 +304,41 @@ static enum CXChildVisitResult niu_visit(CXCursor c, CXCursor parent, CXClientDa
     return CXChildVisit_Recurse;
 }
 
-/* Parses the input and walks it. The original text in src is handed to
- * libclang as an unsaved file too, so the byte offsets libclang reports are
- * offsets into exactly this text. Returns 1 when there were no errors. */
+/* One parse of the pre-passed text. */
+static CXTranslationUnit niu_parse(const niu_options *o, CXIndex index, niu_strlist *args, niu_unit *u, int *rc)
+{
+    struct CXUnsavedFile unsaved[2];
+    CXTranslationUnit tu = NULL;
+    unsigned flags = CXTranslationUnit_DetailedPreprocessingRecord | CXTranslationUnit_KeepGoing;
+    unsaved[0].Filename = o->input;
+    unsaved[0].Contents = u->pp.text;
+    unsaved[0].Length = (unsigned long)u->len;
+    unsaved[1].Filename = u->niu_h_path;
+    unsaved[1].Contents = niu_h_text;
+    unsaved[1].Length = (unsigned long)(sizeof niu_h_text - 1);
+    *rc = cx.clang_parseTranslationUnit2(index, o->input, (const char *const *)args->items, (int)args->count, unsaved,
+                                         2, flags, &tu);
+    return tu;
+}
+
+/* Parses the input and walks it. The text libclang reads is the input after
+ * the token pre-pass, which keeps every offset; so the byte offsets libclang
+ * reports are offsets into the original text, which is what niu edits.
+ * Returns 1 when there were no errors; u->lowered is then the output. */
 static int niu_process(const niu_options *o, const char *src, size_t len, niu_unit *u)
 {
     niu_strlist args = {0};
-    struct CXUnsavedFile unsaved[2];
     char *root = niu_virtual_root();
     char *incdir, *target;
     CXIndex index;
-    unsigned flags = CXTranslationUnit_DetailedPreprocessingRecord | CXTranslationUnit_KeepGoing;
-    int rc, ok = 0;
-    size_t i;
+    int rc, ok = 0, attempt;
+    size_t i, found;
 
     memset(u, 0, sizeof *u);
     u->opts = o;
     u->src = src;
     u->len = len;
+    u->niu_h_off = (size_t)-1;
     incdir = niu_path_join(root, "include");
     u->niu_h_path = niu_path_join(incdir, "niu.h");
 
@@ -329,27 +365,70 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
         fputc('\n', stderr);
     }
 
-    unsaved[0].Filename = o->input;
-    unsaved[0].Contents = src;
-    unsaved[0].Length = (unsigned long)len;
-    unsaved[1].Filename = u->niu_h_path;
-    unsaved[1].Contents = niu_h_text;
-    unsaved[1].Length = (unsigned long)(sizeof niu_h_text - 1);
-
     index = cx.clang_createIndex(0, 0);
-    rc = cx.clang_parseTranslationUnit2(index, o->input, (const char *const *)args.items, (int)args.count, unsaved, 2,
-                                        flags, &u->tu);
+    /* The pre-pass needs to know where `#include <niu.h>` is, and the text
+     * can only guess (it might be inside #if 0). When the parse finds it
+     * somewhere else, the pre-pass runs again from there. */
+    found = niu_find_niu_include(src, len);
+    for (attempt = 0; attempt < 2; attempt++) {
+        niu_prepass_run(&u->pp, src, len, found);
+        u->tu = niu_parse(o, index, &args, u, &rc);
+        if (rc != CXError_Success || !u->tu)
+            break;
+        u->is_niu_file = 0;
+        u->niu_h_off = (size_t)-1;
+        u->n_niu_h = 0;
+        u->niu_h = NULL; /* belongs to the previous parse */
+        cx.clang_visitChildren(cx.clang_getTranslationUnitCursor(u->tu), niu_visit, u);
+        if (u->niu_h_off == found || attempt == 1)
+            break;
+        found = u->niu_h_off;
+        u->errors = 0;
+        niu_strlist_free(&u->niu_headers);
+        cx.clang_disposeTranslationUnit(u->tu);
+        u->tu = NULL;
+        niu_prepass_free(&u->pp);
+    }
     if (rc != CXError_Success || !u->tu) {
         niu_message_at(o->input, "error", "libclang could not parse the file (error code %d)", rc);
         u->errors++;
     } else {
-        u->errors += niu_report_diagnostics(u->tu);
-        cx.clang_visitChildren(cx.clang_getTranslationUnitCursor(u->tu), niu_visit, u);
+        niu_dctx dc;
+        CXFile main_file = cx.clang_getFile(u->tu, o->input);
+        memset(&dc, 0, sizeof dc);
+        dc.tu = u->tu;
+        dc.main_file = main_file;
+        dc.input = o->input;
+        dc.src = src;
+        dc.len = len;
+        dc.eol = niu_line_ending(src, len);
+        dc.pp = &u->pp;
+        dc.no_line = o->no_line;
+        dc.warn_empty_defer_now = o->warn_empty_defer_now;
+        u->errors += niu_report_diagnostics(u->tu, &u->pp, main_file);
+        if (u->is_niu_file) {
+            /* every `#include <niu.h>` line becomes a comment */
+            for (i = 0; i < u->n_niu_h; i++) {
+                size_t b = u->niu_h_ranges[2 * i], e = u->niu_h_ranges[2 * i + 1];
+                niu_ledit_text(&dc, -1, b, e, niu_comment_out(src + b, e - b));
+            }
+            niu_defer_analyze(&dc);
+            niu_print_ddiags(&dc);
+            u->errors += dc.errors;
+        }
         if (!u->is_niu_file && niu_has_niu_name(o->input) && o->warn_file_name)
             niu_message_at(o->input, "warning",
                            "'%s' is named like a niu file but does not include <niu.h> [-Wniu-file-name]",
                            niu_basename(o->input));
+        if (u->errors == 0) {
+            u->lowered = niu_lower_file(&dc);
+            if (dc.internal_error) {
+                niu_message_at(o->input, "error", "internal error: overlapping edits");
+                u->errors++;
+            }
+        }
         ok = u->errors == 0;
+        niu_dctx_free(&dc);
         cx.clang_disposeTranslationUnit(u->tu);
         u->tu = NULL;
     }
@@ -363,7 +442,9 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
 
 static void niu_unit_free(niu_unit *u)
 {
-    niu_edits_free(&u->edits);
+    niu_prepass_free(&u->pp);
+    free(u->lowered);
+    free(u->niu_h_ranges);
     niu_strlist_free(&u->niu_headers);
     free(u->niu_h_path);
 }

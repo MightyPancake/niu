@@ -113,12 +113,15 @@ for name in $samples; do
         continue
     fi
 
-    # --no-line: the same without line 2. This also replaces the file
-    # written above, which niu may do because it generated it.
-    # (head and tail, not sed: Git Bash's sed drops the CR of CRLF lines.)
-    { head -n 1 "$here/expected/$out"; tail -n +3 "$here/expected/$out"; } >"$d/expected-no-line"
+    # --no-line: the same without any #line directive (line 2, and those
+    # around copies of deferred statements). This also replaces the file
+    # written above, which niu may do because it generated it. Line endings
+    # are compared above; here CRs are dropped on both sides, because Git
+    # Bash's text tools drop them unpredictably.
+    tr -d '\r' <"$here/expected/$out" | grep -v '^#line ' >"$d/expected-no-line"
     if (cd "$d" && "$niu" transpile --no-line -Wno-niu-plain-file "$name") >"$d/log" 2>&1 &&
-        cmp "$d/$out" "$d/expected-no-line" >"$d/cmp" 2>&1; then
+        tr -d '\r' <"$d/$out" >"$d/actual-no-line" &&
+        cmp "$d/actual-no-line" "$d/expected-no-line" >"$d/cmp" 2>&1; then
         pass "$name -> $out with --no-line (replacing niu's own file)"
     else
         cat "$d/cmp" >>"$d/log"
@@ -172,13 +175,22 @@ compiler_kind() {
 }
 
 # compile <compiler> <kind> <std flag> <source> <exe> <log> [extra flags...]
+# With gnu_mode=1, gcc and clang compile GNU C (-std=gnu11 for c11, no
+# -pedantic-errors), for the gnu_* samples.
+gnu_mode=0
 compile() {
     c_cc=$1 c_kind=$2 c_std=$3 c_src=$4 c_exe=$5 c_log=$6
     shift 6
     case $c_kind in
     msvc) (cd "$(dirname "$c_src")" && "$c_cc" -nologo -W4 -WX "-std:$c_std" "$@" "-Fe$(basename "$c_exe")" "$(basename "$c_src")") >"$c_log" 2>&1 ;;
     tcc) "$c_cc" "-std=$c_std" -Wall -Werror "$@" -o "$c_exe" "$c_src" >"$c_log" 2>&1 ;;
-    *) "$c_cc" "-std=$c_std" -Wall -Wextra -Werror -pedantic-errors "$@" -o "$c_exe" "$c_src" >"$c_log" 2>&1 ;;
+    *)
+        if [ $gnu_mode = 1 ]; then
+            "$c_cc" "-std=gnu${c_std#c}" -Wall -Wextra -Werror "$@" -o "$c_exe" "$c_src" >"$c_log" 2>&1
+        else
+            "$c_cc" "-std=$c_std" -Wall -Wextra -Werror -pedantic-errors "$@" -o "$c_exe" "$c_src" >"$c_log" 2>&1
+        fi
+        ;;
     esac
 }
 
@@ -258,9 +270,17 @@ for cc in $compilers; do
         fi
         for name in $samples; do
             out=$(output_name "$name")
+            # gnu_* samples use GNU C (statement expressions), which cl lacks
+            gnu_mode=0 nstd_flag=$nstd
+            case $name in
+            gnu_*)
+                [ "$kind" = msvc ] && continue
+                gnu_mode=1 nstd_flag=gnu${nstd#c}
+                ;;
+            esac
             d=$(fresh_dir "cc-$(basename "$cc")-$label-$name" "$name")
-            if ! (cd "$d" && "$niu" transpile "-std=$nstd" "$name") >"$d/log" 2>&1; then
-                fail "$cc $label $name: niu transpile -std=$nstd failed" "$d/log"
+            if ! (cd "$d" && "$niu" transpile "-std=$nstd_flag" "$name") >"$d/log" 2>&1; then
+                fail "$cc $label $name: niu transpile -std=$nstd_flag failed" "$d/log"
                 continue
             fi
             if ! compile "$cc" "$kind" "$flag" "$d/$out" "$d/prog$exe" "$d/log"; then
@@ -282,6 +302,7 @@ $(line_file_name "$kind" "$d/$out" hello.niu.c)" ;;
                 fail "$cc -std=$flag $out: the program failed" "$d/log"
             fi
         done
+        gnu_mode=0
     done
 done
 
@@ -519,6 +540,147 @@ expect "unknown options are usage errors" 2 - "$niu" transpile --frobnicate app.
 expect "one input file per run" 2 - "$niu" check app.c app.c
 expect "a missing input file is reported" 1 - "$niu" check no-such-file.c &&
     stderr_has "  ... message" "cannot read 'no-such-file.c'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "== defer errors and warnings"
+
+# defer_case <test name> <expected exit code> <expected stderr> [niu options]:
+# runs `niu check` on the file x.c, which the caller has just written to
+# $d/x.c from the standard input. Every message here is niu's own, so the
+# whole of stderr is compared.
+defer_case() {
+    dc_name=$1 dc_rc=$2 dc_err=$3
+    shift 3
+    expect "$dc_name" "$dc_rc" "$dc_err" "$niu" check "$@" x.c
+}
+
+# The prelude every case starts with: lines 1 to 3.
+prelude='#include <stdlib.h>
+#include <stdio.h>
+#include <niu.h>'
+
+d=$(fresh_dir defer-errors)
+
+printf '%s\nvoid f(char *p) {\n    if (p) defer free(p);\n}\n' "$prelude" >"$d/x.c"
+defer_case "1: a defer must be directly inside braces" 1 \
+    "x.c:5:12: error: 'defer' must appear directly inside a block '{ }'"
+
+printf '%s\nvoid f(char *p) {\nl:  defer free(p);\n}\n' "$prelude" >"$d/x.c"
+defer_case "1: a defer cannot have a label" 1 \
+    "x.c:5:5: error: 'defer' must appear directly inside a block '{ }'"
+
+printf '%s\nint f(int ok) {\n    defer { if (!ok) return 1; }\n    return 0;\n}\n' "$prelude" >"$d/x.c"
+defer_case "2: return cannot leave a deferred statement" 1 \
+    "x.c:5:22: error: 'return' cannot leave a deferred statement
+x.c:5:5: note: the 'defer' is here"
+
+printf '%s\nvoid f(void) {\n    for (;;) { defer { break; } }\n}\n' "$prelude" >"$d/x.c"
+defer_case "2: break cannot leave a deferred statement" 1 \
+    "x.c:5:24: error: 'break' cannot leave a deferred statement
+x.c:5:16: note: the 'defer' is here"
+
+printf '%s\nvoid f(int x) {\n    defer { for (;;) { if (x) break; } }\n}\n' "$prelude" >"$d/x.c"
+defer_case "2: a break that stays inside is fine" 0 ""
+
+printf '%s\nvoid f(char *p) {\n    goto skip;\n    defer free(p);\nskip:\n    free(p);\n}\n' "$prelude" >"$d/x.c"
+defer_case "3: goto into the scope of a defer" 1 \
+    "x.c:5:5: error: 'goto' jumps into the scope of a 'defer'
+x.c:6:5: note: the 'defer' is here"
+
+printf '%s\nvoid f(int x) {\n    switch (x) {\n        defer puts("x");\n    case 1:\n        break;\n    }\n}\n' "$prelude" >"$d/x.c"
+defer_case "3: case label inside the scope of a defer" 1 \
+    "x.c:7:5: error: 'case' label is inside the scope of a 'defer'
+x.c:6:9: note: the 'defer' is here"
+
+printf '%s\nvoid f(void) {\n    defer { l: ; }\n}\n' "$prelude" >"$d/x.c"
+defer_case "4: no labels in a deferred statement" 1 \
+    "x.c:5:13: error: labels are not allowed in a deferred statement
+x.c:5:5: note: the 'defer' is here"
+
+printf '%s\nvoid f(void) {\n    defer { static int n; n++; }\n}\n' "$prelude" >"$d/x.c"
+defer_case "5: no static variables in a deferred statement" 1 \
+    "x.c:5:13: error: 'static' variables are not allowed in a deferred statement
+x.c:5:5: note: the 'defer' is here"
+
+printf '%s\nvoid f(int *other) {\n    int *p = malloc(4);\n    defer free(p);\n    {\n        int *p = other;\n        return;\n    }\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: a name that means something else at an exit" 1 \
+    "x.c:9:9: error: 'p' in this deferred statement would refer to a different declaration at this exit
+x.c:8:14: note: 'p' is declared here
+x.c:6:5: note: the 'defer' is here"
+
+printf '%s\nvoid f(int n) {\n    void *t = &&out;\n    defer puts("x");\n    if (n) goto *t;\nout:\n    ;\n}\n' "$prelude" >"$d/x.c"
+defer_case "7: no computed goto in the scope of a defer" 1 \
+    "x.c:7:12: error: computed 'goto' is not allowed in the scope of a 'defer'
+x.c:6:5: note: the 'defer' is here"
+
+printf '%s\nint __niu_mine;\n' "$prelude" >"$d/x.c"
+defer_case "8: __niu names are reserved" 1 \
+    "x.c:4:5: error: identifiers starting with '__niu' are reserved"
+
+# spec.md, constraint 9
+printf '%s\nvoid log_error(const char *);\nvoid f(int bad, int worse) {\n    char *p = malloc(8);\n    defer free(p);\n    if (bad) {\n        defer_now;\n        fprintf(stderr, "fatal\\n");\n        exit(1);\n    }\n    if (worse) {\n        defer_now;\n        log_error("worse");\n    }\n}\n' "$prelude" >"$d/x.c"
+defer_case "9: control continues after defer_now" 1 \
+    "x.c:16:5: error: control can leave the scope of a 'defer' after 'defer_now'; its cleanup would run twice
+x.c:14:9: note: 'defer_now' is here"
+
+printf '%s\nvoid f(char *p) {\n    defer free(p);\n    for (;;) {\n        defer_now;\n        break;\n    }\n}\n' "$prelude" >"$d/x.c"
+defer_case "9: a jump after defer_now" 1 \
+    "x.c:8:9: error: control can leave the scope of a 'defer' after 'defer_now'; its cleanup would run twice
+x.c:7:9: note: 'defer_now' is here"
+
+printf '%s\nvoid f(char *p, int a) {\n    defer free(p);\n    if (a) {\n        defer_now;\n        if (a > 1)\n            abort();\n        else\n            exit(1);\n    }\n}\n' "$prelude" >"$d/x.c"
+defer_case "9: every path ends in a noreturn call" 0 ""
+
+printf '%s\n_Noreturn void die(void);\nvoid f(char *p) {\n    defer free(p);\n    {\n        defer_now;\n        die();\n    }\n}\n' "$prelude" >"$d/x.c"
+defer_case "9: _Noreturn functions count" 0 ""
+
+printf '%s\nvoid f(void) {\n    defer { defer_now; }\n}\n' "$prelude" >"$d/x.c"
+defer_case "10: no defer_now in a deferred statement" 1 \
+    "x.c:5:13: error: 'defer_now' cannot appear inside a deferred statement
+x.c:5:5: note: the 'defer' is here"
+
+printf '%s\n#define LOG(msg) fprintf(stderr, "%%s\\n", msg)\nint f(void) {\n    defer LOG("leaving");\n#undef LOG\n#define LOG(msg)\n    return 0;\n}\n' "$prelude" >"$d/x.c"
+defer_case "11: a macro the defer uses is redefined" 1 \
+    "x.c:7:1: error: 'LOG' is redefined while a deferred statement that uses it is still pending
+x.c:6:5: note: the 'defer' is here"
+
+printf '%s\nvoid f(void) {\n    defer printf("%%d", __COUNTER__);\n}\n' "$prelude" >"$d/x.c"
+defer_case "11: no __COUNTER__ in a deferred statement" 1 \
+    "x.c:5:5: error: '__COUNTER__' cannot be used in a deferred statement"
+
+printf '%s\nvoid f(void) {\n    defer_now;\n}\n' "$prelude" >"$d/x.c"
+defer_case "-Wniu-empty-defer-now" 0 \
+    "x.c:5:5: warning: 'defer_now' has no pending defers to run [-Wniu-empty-defer-now]"
+defer_case "-Wno-niu-empty-defer-now turns it off" 0 "" -Wno-niu-empty-defer-now
+
+printf '%s\nvoid f(void) {\n    int defer = 3;\n    (void)defer;\n}\n' "$prelude" >"$d/x.c"
+defer_case "a niu keyword cannot be a name in a niu file" 1 \
+    "x.c:5:9: error: 'defer' is a keyword in niu files and cannot be used as a name
+x.c:6:11: error: 'defer' is a keyword in niu files and cannot be used as a name"
+
+printf '#include <stdio.h>\nint defer = 1;\n#include <niu.h>\nvoid f(void) { defer puts("x"); }\n' >"$d/x.c"
+defer_case "before #include <niu.h>, defer is a name" 0 ""
+
+# Defers and macros (the companion macro, spec notes)
+printf '%s\n#define CHECK(x) if (!(x)) return -1\nint f(char *p) {\n    defer free(p);\n    CHECK(p);\n    return 0;\n}\n' "$prelude" >"$d/x.c"
+defer_case "an exit from a macro in the scope of a defer" 1 \
+    "x.c:7:5: error: 'return' comes from the macro 'CHECK' and leaves the scope of a 'defer'; niu cannot add the cleanup there
+x.c:6:5: note: the 'defer' is here"
+
+printf '%s\n#define TWO(p) defer free(p); puts("x")\nvoid f(char *p) {\n    TWO(p);\n}\n' "$prelude" >"$d/x.c"
+defer_case "a defer must be the last statement of its macro" 1 \
+    "x.c:6:5: error: the 'defer' must be the last statement in the macro 'TWO'
+x.c:4:1: note: 'TWO' is defined here"
+
+printf '%s\n#define AUTOFREE(p) defer free(p)\n#define OUTER(p) AUTOFREE(p)\nvoid f(char *p) {\n    OUTER(p);\n}\n' "$prelude" >"$d/x.c"
+defer_case "a macro with a defer must be used directly" 1 \
+    "x.c:7:5: error: the macro 'AUTOFREE' contains a 'defer', so it must be used directly, not from another macro
+x.c:4:1: note: 'AUTOFREE' is defined here"
+
+printf '%s\n#define FATAL() do { defer_now; exit(1); } while (0)\n' "$prelude" >"$d/x.c"
+defer_case "no defer_now in a macro" 1 \
+    "x.c:4:22: error: 'defer_now' cannot be used in a macro"
 
 # ---------------------------------------------------------------------------
 echo

@@ -1,0 +1,217 @@
+/* defer: the examples of spec.md "Lowering", and checks that the lowered
+ * program runs every deferred statement at the right time, in the right
+ * order. Portable C99, so every compiler (cl too) compiles the output. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <niu.h>
+
+/* Every deferred statement here appends to this log; check() compares it. */
+static char log_[256];
+/* (no strcat: cl -W4 -WX rejects it as deprecated) */
+static void L(const char *s)
+{
+    size_t n = strlen(log_);
+    while (*s && n + 1 < sizeof log_)
+        log_[n++] = *s++;
+    log_[n] = '\0';
+}
+static int check(const char *want)
+{
+    int ok = strcmp(log_, want) == 0;
+    if (!ok)
+        printf("expected \"%s\", got \"%s\"\n", want, log_);
+    log_[0] = '\0';
+    return ok;
+}
+
+/* ---- spec.md "Lowering", as written there ---- */
+
+static void foo(int *a, int *b) { L(a && b ? "f" : "?"); }
+static void *func_that_needs_cleanup(void) { return malloc(1); }
+static void cleanup(void *p) { free(p); L("c"); }
+static int use_bar(void *p) { L(p ? "u" : "?"); return 1; }
+
+static void spec_block(void)
+{
+    {
+        int* ptr = (int*)malloc(16*sizeof(int));
+        defer free(ptr);
+        //use pointer
+    }
+}
+
+static void spec_order(void)
+{
+    {
+        defer L("a");
+        defer L("b");
+    }
+}
+
+static void spec_loop(void)
+{
+int i = 0;
+while(10 > i++){
+    int* ptr = (int*)malloc(16*sizeof(int));
+    int* ptr2 = (int*)malloc(16*sizeof(int));
+    defer { free(ptr); free(ptr2); }
+    if (i==8) break;
+    if (i==5) continue;
+    foo(ptr, ptr2);
+}
+}
+
+static int spec_return(void){
+    void* bar = func_that_needs_cleanup();
+    defer cleanup(bar);
+    return use_bar(bar);
+}
+
+/* ---- when and in which order ---- */
+
+static int scopes(int err)
+{
+    defer L("a");
+    {
+        defer L("b");
+        defer L("c");
+        if (err)
+            return -1; /* c b a */
+    }                  /* c b */
+    L("-");
+    return 0; /* a */
+}
+
+static int values(void)
+{
+    int n = 1;
+    defer {
+        char b[2];
+        b[0] = (char)('0' + n);
+        b[1] = '\0';
+        L(b);
+    }
+    n = 2;
+    return n * 10; /* the value first (20), then the defer sees n == 2 */
+}
+
+static void loops(void)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        defer L("e");
+        switch (i) {
+        case 1:
+            break; /* leaves only the switch */
+        case 2:
+            continue; /* e */
+        default:
+            break;
+        }
+        if (i == 3)
+            break; /* e */
+        L("x");
+    } /* e */
+}
+
+static void gotos(void)
+{
+    int tries = 0;
+    {
+    retry:
+        tries++;
+        defer L("g");
+        if (tries < 3)
+            goto retry; /* g, then the defer is registered again */
+        L("y");
+    } /* g */
+    {
+        defer L("h");
+        if (tries)
+            goto out; /* h */
+        L("never");
+    }
+out:
+    L("z");
+}
+
+static void nested(void)
+{
+    defer {
+        defer L("1");
+        L("2");
+    }
+    L("3");
+}
+
+static void multiline(int early)
+{
+    defer {
+        L("m");
+        L("n");
+    }
+    if (early)
+        return;
+    L("-");
+}
+
+static void before(int skip)
+{
+    if (skip)
+        return; /* no defer is registered yet: unchanged */
+    defer L("b");
+}
+
+static int fatal_path(int bad)
+{
+    defer L("f");
+    if (bad) {
+        defer_now; /* f, before exit() skips the defers (never taken here) */
+        exit(3);
+    }
+    return 0;
+}
+
+/* the spellings of the WG14 defer TS */
+static int ts_spelling(int bad)
+{
+    _Defer L("t");
+    if (bad) {
+        _Defer_now;
+        exit(4);
+    }
+    return 0;
+}
+
+int main(void)
+{
+    int ok = 1;
+    spec_block();
+    spec_order();
+    ok &= check("ba");
+    spec_loop();
+    ok &= check("ffffff"); /* i = 1, 2, 3, 4, 6, 7 */
+    ok &= spec_return() == 1 && check("uc");
+    ok &= scopes(1) == -1 && check("cba");
+    ok &= scopes(0) == 0 && check("cb-a");
+    ok &= values() == 20 && check("2");
+    loops();
+    ok &= check("xexeee");
+    gotos();
+    ok &= check("ggygh" "z");
+    nested();
+    ok &= check("321");
+    multiline(1);
+    ok &= check("mn");
+    multiline(0);
+    ok &= check("-mn");
+    before(1);
+    ok &= check("");
+    before(0);
+    ok &= check("b");
+    ok &= fatal_path(0) == 0 && check("f");
+    ok &= ts_spelling(0) == 0 && check("t");
+    printf("%s\n", ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}

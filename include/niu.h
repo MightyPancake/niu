@@ -14,7 +14,10 @@
 #define __NIU_H
 
 #if defined(__NIU_STD__)
-/* Read by niu itself: the niu keywords are not macros. */
+/* Read by niu itself: the niu keywords are not macros. niu's pre-pass puts
+ * code that refers to $ where each keyword is, to find them in the AST. */
+#pragma clang system_header
+enum { $ };
 #elif defined(__NIU_TOOLING__)
 /* Stubs for editor tools. A deferred statement is kept behind `if (0)`, so it
  * is still parsed and checked, but analysers do not see it run early (for

@@ -66,16 +66,17 @@ static void niu_append_string_literal(niu_buf *out, const char *s)
 }
 
 /* Builds the lowered file: the generated comment, #line (unless no_line),
- * then the original text with the edits applied. */
-static int niu_render_output(const char *input, const char *src, size_t len, niu_edits *edits, int no_line,
-                             niu_buf *out)
+ * then the lowered text (the original with niu's edits applied). */
+static void niu_render_output(const char *input, const char *src, size_t len, const char *lowered, int no_line,
+                              niu_buf *out)
 {
     const char *eol = niu_line_ending(src, len);
     const char *name = niu_basename(input);
+    size_t skip = 0;
     /* A byte order mark has to stay the very first thing in the file. */
-    if (len >= 3 && memcmp(src, niu_utf8_bom, 3) == 0) {
-        niu_buf_append(out, src, 3);
-        niu_edits_add(edits, 0, 3, niu_strdup(""));
+    if (strncmp(lowered, niu_utf8_bom, 3) == 0) {
+        niu_buf_append(out, lowered, 3);
+        skip = 3;
     }
     niu_buf_puts(out, NIU_GENERATED_PREFIX " from \"");
     niu_append_comment_safe(out, name, strlen(name));
@@ -85,7 +86,7 @@ static int niu_render_output(const char *input, const char *src, size_t len, niu
         niu_append_string_literal(out, name);
         niu_buf_printf(out, "\"%s", eol);
     }
-    return niu_edits_apply(edits, src, len, out);
+    niu_buf_puts(out, lowered + skip);
 }
 
 /* Writes the lowered text to output, refusing to replace a file that niu did

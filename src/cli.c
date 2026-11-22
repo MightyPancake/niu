@@ -18,6 +18,8 @@ static void niu_usage(FILE *f)
           "  --no-query-cc       do not ask $CC (or cc; gcc for a mingw niu) for its system include directories\n"
           "  -Wno-niu-file-name  no warning for a .niu.c/.niu.h file without <niu.h>\n"
           "  -Wno-niu-plain-file no warning when transpiling a file without <niu.h>\n"
+          "  -Wno-niu-empty-defer-now\n"
+          "                      no warning for a defer_now with no pending defers\n"
           "  -v                  show which libclang is used and how it is called\n"
           "  --version           show the versions of niu and libclang\n"
           "\n"
@@ -43,6 +45,7 @@ static int niu_parse_options(int argc, char **argv, niu_options *o)
     memset(o, 0, sizeof *o);
     o->warn_file_name = 1;
     o->warn_plain_file = 1;
+    o->warn_empty_defer_now = 1;
     for (i = 0; i < argc; i++) {
         const char *a = argv[i];
         if (!only_files && a[0] == '-' && a[1] != '\0') {
@@ -69,6 +72,10 @@ static int niu_parse_options(int argc, char **argv, niu_options *o)
                 o->warn_plain_file = 0;
             } else if (strcmp(a, "-Wniu-plain-file") == 0) {
                 o->warn_plain_file = 1;
+            } else if (strcmp(a, "-Wno-niu-empty-defer-now") == 0) {
+                o->warn_empty_defer_now = 0;
+            } else if (strcmp(a, "-Wniu-empty-defer-now") == 0) {
+                o->warn_empty_defer_now = 1;
             } else if (strcmp(a, "-v") == 0 || strcmp(a, "--verbose") == 0) {
                 o->verbose = 1;
             } else {
@@ -116,9 +123,8 @@ static int niu_run(int argc, char **argv, int write_output)
                                "'%s' is not a niu file (it does not include <niu.h>), so '%s' is an unchanged "
                                "copy [-Wniu-plain-file]",
                                niu_basename(o.input), niu_basename(name));
-            if (!niu_render_output(o.input, src.data, src.len, &u.edits, o.no_line, &out))
-                niu_message_at(o.input, "error", "internal error: overlapping edits");
-            else if (niu_write_output(o.input, name, &out))
+            niu_render_output(o.input, src.data, src.len, u.lowered, o.no_line, &out);
+            if (niu_write_output(o.input, name, &out))
                 rc = NIU_EXIT_OK;
             niu_buf_free(&out);
             free(name);
