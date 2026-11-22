@@ -127,9 +127,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cc: [cl, clang]
+        # gcc is mingw-w64: a niu built with it parses for mingw
+        # (x86_64-w64-windows-gnu); the others parse for MSVC.
+        cc: [cl, clang, gcc]
     env:
-      NIU_TEST_CC: cl clang
+      NIU_TEST_CC: ${{ matrix.cc == 'gcc' && 'gcc' || 'cl clang' }}
+      MINGW_VERSION: 16.2.0-rt_v14-rev1
+      MINGW_SHA256: 26788998d615856a915e1eeacb0854fce87bc608fa9a0c16f96bcbfdcf3415c0
     defaults:
       run:
         shell: bash
@@ -143,35 +147,82 @@ jobs:
         run: choco install llvm --version=20.1.8 --allow-downgrade -y --no-progress
 
       - name: Set up MSVC (x64)
+        if: matrix.cc != 'gcc'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
 
+      - name: Cache mingw-w64 ${{ env.MINGW_VERSION }}
+        if: matrix.cc == 'gcc'
+        id: cache-mingw
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/mingw-${{ env.MINGW_VERSION }}
+          key: mingw-${{ env.MINGW_VERSION }}-x86_64-posix-seh-ucrt
+
+      # GCC 16.2.0 from niXman/mingw-builds-binaries, checked against the
+      # sha256 GitHub publishes for the release asset.
+      - name: Download mingw-w64 ${{ env.MINGW_VERSION }} (pinned)
+        if: matrix.cc == 'gcc' && steps.cache-mingw.outputs.cache-hit != 'true'
+        run: |
+          v=$MINGW_VERSION
+          f="x86_64-${v%%-*}-release-posix-seh-ucrt-${v#*-}.7z"
+          curl -fsSL -o mingw.7z "https://github.com/niXman/mingw-builds-binaries/releases/download/$v/$f"
+          echo "$MINGW_SHA256  mingw.7z" | sha256sum -c -
+          7z x -y -o"$HOME/mingw-$v" mingw.7z >/dev/null
+          rm mingw.7z
+
+      - name: Use mingw-w64 ${{ env.MINGW_VERSION }}
+        if: matrix.cc == 'gcc'
+        run: |
+          bin=$HOME/mingw-$MINGW_VERSION/mingw64/bin
+          test -x "$bin/gcc.exe"
+          cygpath -w "$bin" >> "$GITHUB_PATH"
+
       - name: Show the toolchain
         run: |
-          command -v cl clang
-          cl 2>&1 | head -1
-          clang --version
+          case "${{ matrix.cc }}" in
+          gcc)
+            command -v gcc
+            gcc --version | head -1
+            gcc --version | head -1 | grep -F " 16.2.0"
+            command -v gcc | grep -F "mingw-$MINGW_VERSION"
+            ;;
+          *)
+            command -v cl clang
+            cl 2>&1 | head -1
+            clang --version
+            ;;
+          esac
 
-      - name: Build niu (cl niu.c / clang niu.c)
+      - name: Build niu (cl niu.c / clang niu.c / gcc niu.c)
         run: |
           case "${{ matrix.cc }}" in
           cl) cl -nologo niu.c ;;
-          clang) clang niu.c -o niu.exe ;;
+          *) ${{ matrix.cc }} niu.c -o niu.exe ;;
           esac
 
       - name: Build niu with warnings as errors
         run: |
           case "${{ matrix.cc }}" in
           cl) cl -nologo -W4 -WX niu.c -Fe:niu-strict.exe ;;
-          clang) clang -std=c99 -Wall -Wextra -Wpedantic -Wvla -Werror niu.c -o niu-strict.exe ;;
+          *) ${{ matrix.cc }} -std=c99 -Wall -Wextra -Wpedantic -Wvla -Werror niu.c -o niu-strict.exe ;;
           esac
 
-      - name: Check which libclang niu loads
+      - name: Check which libclang and target niu uses
         run: |
           ./niu.exe --version | tee version.txt
           grep -F 'LLVM\bin\libclang.dll' version.txt
           grep -F 'clang version 20.1.8' version.txt
+          ./niu.exe check -v tests/samples/app.c 2>&1 | tee args.txt
+          case "${{ matrix.cc }}" in
+          gcc)
+            # mingw: the mingw target, with gcc's include directories
+            grep -F -- '--target=x86_64-w64-windows-gnu' args.txt
+            grep -F -- '-idirafter' args.txt
+            ;;
+          *) grep -F -- '--target=x86_64-pc-windows-msvc' args.txt ;;
+          esac
 
       - name: Test
         run: bash tests/run.sh ./niu.exe

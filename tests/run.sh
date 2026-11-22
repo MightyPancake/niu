@@ -12,7 +12,7 @@
 #   NIU_TEST_CC   the C compilers to compile the outputs with, separated by
 #                 spaces. A compiler listed here that is missing fails the
 #                 run. Default: those of gcc, clang, tcc that are installed
-#                 (cl and clang on Windows).
+#                 (cl, clang and gcc on Windows).
 #   NIU_LIBCLANG  passed on to niu (see README.md).
 
 set -u
@@ -149,7 +149,7 @@ else
     required=0
     compilers=
     if [ $windows = 1 ]; then
-        candidates="cl clang"
+        candidates="cl clang gcc"
     else
         candidates="gcc clang tcc"
     fi

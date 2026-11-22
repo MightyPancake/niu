@@ -13,25 +13,39 @@ typedef struct {
     int verbose;            /* -v */
 } niu_options;
 
-/* The target libclang parses for. On Windows niu targets MSVC unless told
- * otherwise, so the MSVC and Windows SDK headers parse the way cl sees them,
- * whichever default target the libclang build has. */
+/* The target libclang parses for. On Windows the default follows the
+ * compiler niu itself was built with, whichever default target the libclang
+ * build has: a niu built with mingw parses for mingw (and asks gcc for its
+ * headers), any other niu for MSVC, so the MSVC and Windows SDK headers parse
+ * the way cl sees them. */
+#if defined(_M_ARM64) || defined(__aarch64__)
+#define NIU_WIN_ARCH "aarch64"
+#elif defined(_M_IX86) || defined(__i386__)
+#define NIU_WIN_ARCH "i686"
+#else
+#define NIU_WIN_ARCH "x86_64"
+#endif
+
 static char *niu_target_triple(const niu_options *o)
 {
     if (o->target)
         return niu_strdup(o->target);
-#ifdef _WIN32
-#if defined(_M_ARM64) || defined(__aarch64__)
-    return niu_strdup("aarch64-pc-windows-msvc");
-#elif defined(_M_IX86) || defined(__i386__)
-    return niu_strdup("i686-pc-windows-msvc");
-#else
-    return niu_strdup("x86_64-pc-windows-msvc");
-#endif
+#if defined(__MINGW32__)
+    return niu_strdup(NIU_WIN_ARCH "-w64-windows-gnu");
+#elif defined(_WIN32)
+    return niu_strdup(NIU_WIN_ARCH "-pc-windows-msvc");
 #else
     return NULL;
 #endif
 }
+
+/* The compiler niu asks for system include directories when $CC is not set.
+ * Not every mingw has a `cc`, but every one has gcc. */
+#ifdef __MINGW32__
+#define NIU_DEFAULT_CC "gcc"
+#else
+#define NIU_DEFAULT_CC "cc"
+#endif
 
 /* Asks the target C compiler for its system include directories, the way
  * clangd's --query-driver does: `$CC -E -v -x c <empty>` prints them between
@@ -47,7 +61,7 @@ static void niu_query_cc(const niu_options *o, niu_strlist *args)
     const char *p;
     int in_list = 0;
     if (!cc || !*cc)
-        cc = "cc";
+        cc = NIU_DEFAULT_CC;
     qargs[0] = "-E";
     qargs[1] = "-v";
     qargs[2] = "-x";

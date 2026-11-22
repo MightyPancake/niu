@@ -15,7 +15,7 @@ static void niu_usage(FILE *f)
           "                      passed on to libclang\n"
           "  --target=<triple>   parse for this target (default on Windows: MSVC)\n"
           "  --no-line           leave out the #line directive in the output\n"
-          "  --no-query-cc       do not ask $CC (or cc) for its system include directories\n"
+          "  --no-query-cc       do not ask $CC (or cc; gcc for a mingw niu) for its system include directories\n"
           "  -Wno-niu-file-name  no warning for a .niu.c/.niu.h file without <niu.h>\n"
           "  -Wno-niu-plain-file no warning when transpiling a file without <niu.h>\n"
           "  -v                  show which libclang is used and how it is called\n"
