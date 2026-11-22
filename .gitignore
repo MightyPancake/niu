@@ -5,3 +5,5 @@
 *.plain.c
 *.plain.h
 /result
+# The expected outputs of the tests are committed.
+!tests/expected/**

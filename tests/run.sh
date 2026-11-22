@@ -116,7 +116,7 @@ for name in $samples; do
     # --no-line: the same without line 2. This also replaces the file
     # written above, which niu may do because it generated it.
     sed '2d' "$here/expected/$out" >"$d/expected-no-line"
-    if (cd "$d" && "$niu" transpile --no-line "$name") >"$d/log" 2>&1 &&
+    if (cd "$d" && "$niu" transpile --no-line -Wno-niu-plain-file "$name") >"$d/log" 2>&1 &&
         cmp "$d/$out" "$d/expected-no-line" >"$d/cmp" 2>&1; then
         pass "$name -> $out with --no-line (replacing niu's own file)"
     else
@@ -322,10 +322,10 @@ for cc in $compilers; do
         if compile "$cc" "$kind" "$flag" "$d/where.plain.c" "$d/prog$exe" "$d/log" -DNIU_TEST_FAIL; then
             fail "$cc where.c ($variant): compiled although it has an #error" "$d/log"
         elif tr -d '\r' <"$d/log" | grep -F -- "$want" >/dev/null &&
-            { [ $variant = no-line ] || ! grep -F where.plain.c "$d/log" >/dev/null; }; then
+            { [ $variant = no-line ] || ! grep -E 'where\.plain\.c[:(]' "$d/log" >/dev/null; }; then
             pass "$cc: errors point at $(basename "$want") ($variant)"
         else
-            { echo "expected the compiler's messages to name $want (and with #line, not where.plain.c):"; cat "$d/log"; } >"$d/why"
+            { echo "expected the compiler's messages to name $want (and with #line, never where.plain.c as a location):"; cat "$d/log"; } >"$d/why"
             fail "$cc where.c ($variant): wrong error location" "$d/why"
         fi
     done
