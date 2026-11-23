@@ -49,7 +49,23 @@ static const niu_fmt_fn niu_fmt_fns[] = {
     {"vsnprintf_s", NIU_FMT_VA_LIST, 2}, {"scanf", NIU_FMT_SCANF, 0},      {"fscanf", NIU_FMT_SCANF, 1},
     {"sscanf", NIU_FMT_SCANF, 1},       {"vscanf", NIU_FMT_SCANF, 0},      {"vfscanf", NIU_FMT_SCANF, 1},
     {"vsscanf", NIU_FMT_SCANF, 1},      {"scanf_s", NIU_FMT_SCANF, 0},     {"fscanf_s", NIU_FMT_SCANF, 1},
-    {"sscanf_s", NIU_FMT_SCANF, 1},     {NULL, 0, 0}};
+    {"sscanf_s", NIU_FMT_SCANF, 1},
+    /* the fortified versions headers use instead (macOS always; glibc with
+     * _FORTIFY_SOURCE), and clang's builtins */
+    {"__builtin___printf_chk", NIU_FMT_PRINTF, 1}, {"__builtin___fprintf_chk", NIU_FMT_PRINTF, 2},
+    {"__builtin___sprintf_chk", NIU_FMT_PRINTF, 3}, {"__builtin___snprintf_chk", NIU_FMT_PRINTF, 4},
+    {"__builtin___vprintf_chk", NIU_FMT_VA_LIST, 1}, {"__builtin___vfprintf_chk", NIU_FMT_VA_LIST, 2},
+    {"__builtin___vsprintf_chk", NIU_FMT_VA_LIST, 3}, {"__builtin___vsnprintf_chk", NIU_FMT_VA_LIST, 4},
+    {"__printf_chk", NIU_FMT_PRINTF, 1},  {"__fprintf_chk", NIU_FMT_PRINTF, 2},
+    {"__sprintf_chk", NIU_FMT_PRINTF, 3}, {"__snprintf_chk", NIU_FMT_PRINTF, 4},
+    {"__vprintf_chk", NIU_FMT_VA_LIST, 1}, {"__vfprintf_chk", NIU_FMT_VA_LIST, 2},
+    {"__vsprintf_chk", NIU_FMT_VA_LIST, 3}, {"__vsnprintf_chk", NIU_FMT_VA_LIST, 4},
+    {"__builtin_printf", NIU_FMT_PRINTF, 0}, {"__builtin_fprintf", NIU_FMT_PRINTF, 1},
+    {"__builtin_sprintf", NIU_FMT_PRINTF, 1}, {"__builtin_snprintf", NIU_FMT_PRINTF, 2},
+    {"__builtin_vprintf", NIU_FMT_VA_LIST, 0}, {"__builtin_vfprintf", NIU_FMT_VA_LIST, 1},
+    {"__builtin_vsprintf", NIU_FMT_VA_LIST, 1}, {"__builtin_vsnprintf", NIU_FMT_VA_LIST, 2},
+    {"__builtin_scanf", NIU_FMT_SCANF, 0}, {"__builtin_sscanf", NIU_FMT_SCANF, 1},
+    {"__builtin_fscanf", NIU_FMT_SCANF, 1}, {NULL, 0, 0}};
 
 typedef struct {
     niu_dctx *c;
@@ -243,7 +259,8 @@ static int niu_fmt_kind(niu_dctx *c, CXCursor f, int *fmt)
     ac.c = c;
     ac.kind = NIU_FMT_NONE;
     ac.fmt = 0;
-    if (cx.clang_Location_isInSystemHeader(cx.clang_getCursorLocation(f)))
+    /* (a builtin has no header) */
+    if (strncmp(name, "__builtin", 9) == 0 || cx.clang_Location_isInSystemHeader(cx.clang_getCursorLocation(f)))
         for (i = 0; niu_fmt_fns[i].name; i++)
             if (strcmp(niu_fmt_fns[i].name, name) == 0) {
                 ac.kind = niu_fmt_fns[i].kind;

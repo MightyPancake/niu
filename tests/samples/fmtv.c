@@ -101,25 +101,25 @@ int main(void)
     /* structs, unions, enums, arrays */
     {
         point p = {1, -2};
-        struct shape sh;
+        struct shape shp;
         color odd = (color)7;
-        memset(&sh, 0, sizeof sh);
-        strcpy(sh.name, "a\"b");
-        sh.at = p;
-        sh.c = VERT;
-        sh.size = BIG;
-        sh.box.w = 3;
-        sh.bits = 5;
-        sh.flag = 1;
-        sh.arr[1] = 7;
-        sh.bytes[0] = 200;
-        sh.u.i = 2;
-        snprintf(buf, sizeof buf, "%v %v %v", p, odd, sh.c);
+        memset(&shp, 0, sizeof shp);
+        memcpy(shp.name, "a\"b", 4);
+        shp.at = p;
+        shp.c = VERT;
+        shp.size = BIG;
+        shp.box.w = 3;
+        shp.bits = 5;
+        shp.flag = 1;
+        shp.arr[1] = 7;
+        shp.bytes[0] = 200;
+        shp.u.i = 2;
+        snprintf(buf, sizeof buf, "%v %v %v", p, odd, shp.c);
         check(buf, "(point){.x = 1, .y = -2} (color)7 GREEN");
-        say(buf, "%v", sh);
+        say(buf, "%v", shp);
         /* longer than the limit of 64: cut where it still keeps its shape */
         check(buf, "(struct shape){.name = \"a\\\"b\", .at = (point){.x = 1, ...}, ...}");
-        say(buf, "%v", sh.u);
+        say(buf, "%v", shp.u);
         check(buf, "(union bits){.i = 2, .b = (bool)2}");
     }
     /* a call built by a macro, with the format and the value written as its

@@ -929,8 +929,9 @@ defer_case "1: no %v with format(printf, m, 0)" 1 \
     "x.c:6:11: error: '%v' cannot be used with 'vlog': the types of a 'va_list' are not known"
 
 printf '%s\nvoid f(int *p) {\n    scanf("%%v", p);\n}\n' "$prelude" >"$d/x.c"
+# (-D_CRT_SECURE_NO_WARNINGS: MSVC's headers deprecate scanf)
 defer_case "1: no %v in a scanf format string" 1 \
-    "x.c:5:12: error: '%v' cannot be used in a scanf format string"
+    "x.c:5:12: error: '%v' cannot be used in a scanf format string" -D_CRT_SECURE_NO_WARNINGS
 
 printf '%s\nvoid f(void) {\n    printf("%%v %%v", 1);\n    printf("%%*v", 1);\n}\n' "$prelude" >"$d/x.c"
 defer_case "3: every %v needs an argument, after a '*' too" 1 \
