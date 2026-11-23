@@ -38,6 +38,10 @@ enum { $ };
 #ifdef __clang__
 /* -pedantic: __auto_type is a GNU extension (GCC does not warn) */
 #pragma clang diagnostic ignored "-Wgnu-auto-type"
+/* %v is not a conversion clang knows, and the argument after it looks
+ * unused; niu checks both itself */
+#pragma clang diagnostic ignored "-Wformat-invalid-specifier"
+#pragma clang diagnostic ignored "-Wformat-extra-args"
 #endif
 #else
 #error "this file must be compiled with niu"

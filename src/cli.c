@@ -20,6 +20,8 @@ static void niu_usage(FILE *f)
           "  -Wno-niu-plain-file no warning when transpiling a file without <niu.h>\n"
           "  -Wno-niu-empty-defer-now\n"
           "                      no warning for a defer_now with no pending defers\n"
+          "  -Wno-niu-v-no-format\n"
+          "                      no warning for a %v passed to a function niu does not know as printf-style\n"
           "  -v                  show which libclang is used and how it is called\n"
           "  --version           show the versions of niu and libclang\n"
           "\n"
@@ -46,6 +48,7 @@ static int niu_parse_options(int argc, char **argv, niu_options *o)
     o->warn_file_name = 1;
     o->warn_plain_file = 1;
     o->warn_empty_defer_now = 1;
+    o->warn_v_no_format = 1;
     for (i = 0; i < argc; i++) {
         const char *a = argv[i];
         if (!only_files && a[0] == '-' && a[1] != '\0') {
@@ -76,6 +79,10 @@ static int niu_parse_options(int argc, char **argv, niu_options *o)
                 o->warn_empty_defer_now = 0;
             } else if (strcmp(a, "-Wniu-empty-defer-now") == 0) {
                 o->warn_empty_defer_now = 1;
+            } else if (strcmp(a, "-Wno-niu-v-no-format") == 0) {
+                o->warn_v_no_format = 0;
+            } else if (strcmp(a, "-Wniu-v-no-format") == 0) {
+                o->warn_v_no_format = 1;
             } else if (strcmp(a, "-v") == 0 || strcmp(a, "--verbose") == 0) {
                 o->verbose = 1;
             } else {

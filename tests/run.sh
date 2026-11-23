@@ -916,5 +916,142 @@ done
 
 # ---------------------------------------------------------------------------
 echo
+echo "== %v errors"
+
+d=$(fresh_dir v-errors)
+
+printf '%s\n#include <stdarg.h>\nvoid f(va_list ap) {\n    vprintf("%%v", ap);\n}\n' "$prelude" >"$d/x.c"
+defer_case "1: no %v with a va_list" 1 \
+    "x.c:6:14: error: '%v' cannot be used with 'vprintf': the types of a 'va_list' are not known"
+
+printf '%s\n__attribute__((format(printf, 1, 0))) void vlog(const char *f, void *ap);\nvoid f(void *ap) {\n    vlog("%%v", ap);\n}\n' "$prelude" >"$d/x.c"
+defer_case "1: no %v with format(printf, m, 0)" 1 \
+    "x.c:6:11: error: '%v' cannot be used with 'vlog': the types of a 'va_list' are not known"
+
+printf '%s\nvoid f(int *p) {\n    scanf("%%v", p);\n}\n' "$prelude" >"$d/x.c"
+defer_case "1: no %v in a scanf format string" 1 \
+    "x.c:5:12: error: '%v' cannot be used in a scanf format string"
+
+printf '%s\nvoid f(void) {\n    printf("%%v %%v", 1);\n    printf("%%*v", 1);\n}\n' "$prelude" >"$d/x.c"
+defer_case "3: every %v needs an argument, after a '*' too" 1 \
+    "x.c:5:16: error: '%v' has no matching argument
+x.c:6:13: error: '%v' has no matching argument"
+
+printf '%s\nvoid f(_Complex double z) {\n    printf("%%v", z);\n}\n' "$prelude" >"$d/x.c"
+defer_case "4: a type %v cannot print" 1 \
+    "x.c:5:13: error: '%v' cannot print a value of type '_Complex double'
+x.c:5:18: note: the argument is here"
+
+printf '%s\nvoid f(void) {\n    printf("%%+v %%lv %%1$v", 1, 2);\n}\n' "$prelude" >"$d/x.c"
+defer_case "7: no flags but '-', no length modifiers, no positional arguments" 1 \
+    "x.c:5:13: error: '%v' cannot take the '+' flag; only a width, '-' and a precision are allowed
+x.c:5:17: error: '%v' cannot take a length modifier: the type of the argument is already known
+x.c:5:21: error: '%v' cannot take a positional argument"
+
+printf '#include <niu.h>\n__attribute__((format(printf, 1, 2))) void lg(const char *f, ...);\nvoid f(void) {\n    lg("%%v", 1);\n}\n' >"$d/x.c"
+defer_case "8: %v needs <stdio.h>" 1 \
+    "x.c:4:9: error: '%v' needs <stdio.h>; include it before 'f'
+x.c:3:6: note: 'f' is here"
+
+printf '%s\nvoid f(void) {\n    puts("%%v");\n    printf("%%%%v\\n");\n}\n' "$prelude" >"$d/x.c"
+var_out "%v outside a printf-style format string is left alone" '    puts("%v");' '    printf("%%v\n");'
+
+printf '%s\nstruct { int a; } anon;\nvoid f(void) {\n    struct L { int a; } l = {1};\n    printf("%%v %%v", l, anon);\n}\n' "$prelude" >"$d/x.c"
+defer_case "5: a struct declared in a function, an unnamed type" 1 \
+    "x.c:7:13: error: '%v' cannot print 'struct L': it is declared inside a function
+x.c:7:21: note: the argument is here
+x.c:7:16: error: '%v' cannot print a value of an unnamed type; give it a typedef name
+x.c:7:24: note: the argument is here"
+
+printf '%s\nstruct in { int x; };\nstruct a { _Atomic struct in v; };\nvoid f(struct a *p) {\n    printf("%%v", *p);\n}\n' "$prelude" >"$d/x.c"
+defer_case "4: no _Atomic structs, at any depth" 1 \
+    "x.c:7:13: error: '%v' cannot print a value of type '_Atomic(struct in)'
+x.c:7:18: note: the argument is here"
+
+printf '%s\n#define FMT "%%v\\n"\n#define SHOW(x) printf("%%v", x)\nvoid f(int x) {\n    printf(FMT, x);\n    SHOW(x);\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: no %v from a macro definition" 1 \
+    "x.c:7:12: error: '%v' cannot be used in a macro definition
+x.c:4:9: note: 'FMT' is defined here
+x.c:8:5: error: '%v' cannot be used in a macro definition
+x.c:5:9: note: 'SHOW' is defined here"
+
+printf '%s\n#define TWICE(...) printf(__VA_ARGS__); printf(__VA_ARGS__)\n#define STR(...) puts(#__VA_ARGS__); printf(__VA_ARGS__)\nvoid f(int x) {\n    TWICE("%%v", x);\n    STR("%%v", x);\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: a macro that uses its argument twice, or turns it into a string" 1 \
+    "x.c:7:12: error: '%v' cannot be used here: the macro 'TWICE' uses its argument more than once
+x.c:4:9: note: 'TWICE' is defined here
+x.c:8:10: error: '%v' cannot be used here: the macro 'STR' turns its argument into a string
+x.c:5:9: note: 'STR' is defined here"
+
+printf '%s\nvoid lg(const char *f, ...);\nvoid f(void) {\n    lg("%%v", 1);\n    puts("%%v");\n}\n' "$prelude" >"$d/x.c"
+defer_case "-Wniu-v-no-format: %v passed to a function niu does not know" 0 \
+    "x.c:6:9: warning: '%v' in a string passed to 'lg', which niu does not know as a printf-style function [-Wniu-v-no-format]
+x.c:4:6: note: add '__attribute__((format(printf, 1, 2)))' to 'lg' to use '%v' with it"
+defer_case "-Wno-niu-v-no-format turns it off" 0 "" -Wno-niu-v-no-format
+
+# Anonymous members (C11), compiled and run with gcc or clang.
+anon_c='#include <stdio.h>
+#include <niu.h>
+
+struct s {
+    int a;
+    struct {
+        int x, y;
+    };
+    union {
+        int i;
+    } u;
+};
+
+int main(void)
+{
+    struct s v = {1, {2, 3}, {4}};
+    printf("%v\n", v);
+    return 0;
+}
+'
+for cc in $compilers; do
+    command -v "$cc" >/dev/null 2>&1 || continue
+    [ "$(compiler_kind "$cc")" = gnu ] || continue
+    d=$(fresh_dir "v-anon-$(basename "$cc")")
+    printf '%s' "$anon_c" >"$d/anon.c"
+    want='(struct s){.a = 1, struct{.x = 2, .y = 3}, .u = union{.i = 4}}'
+    if (cd "$d" && "$niu" transpile anon.c) >"$d/log" 2>&1 &&
+        compile "$cc" gnu c11 "$d/anon.plain.c" "$d/prog$exe" "$d/log" &&
+        (cd "$d" && ./prog$exe) >"$d/stdout" 2>>"$d/log" &&
+        [ "$(tr -d '\r' <"$d/stdout")" = "$want" ]; then
+        pass "$cc: %v prints anonymous members in place"
+    else
+        { echo "expected: $want"; echo "actual:"; cat "$d/stdout" 2>/dev/null; } >>"$d/log"
+        fail "$cc: %v with anonymous members" "$d/log"
+    fi
+done
+d=$work/v-errors
+
+# niu.h's tooling mode: clang warns about neither %v nor its argument.
+tooling_v_c='#include <stdio.h>
+#include <niu.h>
+
+int main(void)
+{
+    if (0)
+        printf("%d %v\n", 2, 1.5);
+    printf("ok\n");
+    return 0;
+}
+'
+for cc in $compilers; do
+    command -v "$cc" >/dev/null 2>&1 || continue
+    case $(basename "$cc") in clang*) ;; *) continue ;; esac
+    d=$(fresh_dir "niu-h-v-$(basename "$cc")")
+    printf '%s' "$tooling_v_c" >"$d/tool.c"
+    if compile "$cc" gnu c11 "$d/tool.c" "$d/prog$exe" "$d/log" "-I$root/include" -D__NIU_TOOLING__ -Wformat; then
+        pass "$cc: -D__NIU_TOOLING__ gives no -Wformat warnings for %v"
+    else
+        fail "$cc: %v gives warnings with -D__NIU_TOOLING__" "$d/log"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+echo
 echo "passed: $passes, failed: $fails, skipped: $skips"
 [ $fails = 0 ]

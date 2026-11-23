@@ -11,6 +11,7 @@ typedef struct {
     int warn_file_name;     /* -Wniu-file-name (on by default) */
     int warn_plain_file;    /* -Wniu-plain-file (on by default) */
     int warn_empty_defer_now; /* -Wniu-empty-defer-now (on by default) */
+    int warn_v_no_format;   /* -Wniu-v-no-format (on by default) */
     int verbose;            /* -v */
 } niu_options;
 
@@ -412,6 +413,10 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
     /* var and let parse as __auto_type, a GNU extension that -pedantic warns
      * about; after the user's flags, so that it wins over -pedantic-errors */
     niu_strlist_push(&args, "-Wno-gnu-auto-type");
+    /* %v is not a conversion clang knows; niu checks it itself, and the C
+     * compiler checks the rest of the format string on the lowered call */
+    niu_strlist_push(&args, "-Wno-format-invalid-specifier");
+    niu_strlist_push(&args, "-Wno-format-extra-args");
 #ifdef __APPLE__
     niu_add_sysroot(&args);
 #endif
@@ -464,6 +469,7 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
         dc.pp = &u->pp;
         dc.no_line = o->no_line;
         dc.warn_empty_defer_now = o->warn_empty_defer_now;
+        dc.warn_v_no_format = o->warn_v_no_format;
         if (u->is_niu_file) {
             /* every `#include <niu.h>` line becomes a comment */
             for (i = 0; i < u->n_niu_h; i++) {

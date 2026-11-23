@@ -181,6 +181,7 @@ typedef struct {
     niu_prepass *pp;
     int no_line;
     int warn_empty_defer_now;
+    int warn_v_no_format;
 
     niu_nlist all_nodes; /* every node, to free them */
     niu_nlist labels;    /* every LabelStmt node */
@@ -2179,8 +2180,9 @@ static void niu_rewrite_defines(niu_dctx *c)
 }
 
 static void niu_var_analyze(niu_dctx *c);
+static void niu_v_analyze(niu_dctx *c);
 
-/* Runs the whole analysis: defers, and var and let (var.c). */
+/* Runs the whole analysis: defers, var and let (var.c), and %v (fmtv.c). */
 static void niu_defer_analyze(niu_dctx *c)
 {
     niu_mvisit mv;
@@ -2200,6 +2202,7 @@ static void niu_defer_analyze(niu_dctx *c)
     niu_check_unmatched(c);
     niu_make_defers(c);
     niu_var_analyze(c);
+    niu_v_analyze(c);
     niu_rewrite_defines(c);
     for (i = 0; i < c->pp->n_directives; i++)
         if (niu_starts_with(c->pp->directives[i].name, "__niu"))

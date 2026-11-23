@@ -76,6 +76,11 @@ enum CXChildVisitResult { CXChildVisit_Break, CXChildVisit_Continue, CXChildVisi
 
 typedef enum CXChildVisitResult (*CXCursorVisitor)(CXCursor cursor, CXCursor parent, CXClientData client_data);
 
+/* enum CXVisitorResult, for clang_Type_visitFields */
+enum CXVisitorResult { CXVisit_Break, CXVisit_Continue };
+
+typedef enum CXVisitorResult (*CXFieldVisitor)(CXCursor c, CXClientData client_data);
+
 /* ---- functions ---- */
 
 /* X(return type, name, parameters). All of them must exist. */
@@ -146,7 +151,13 @@ typedef enum CXChildVisitResult (*CXCursorVisitor)(CXCursor cursor, CXCursor par
     X(unsigned, clang_isVolatileQualifiedType, (CXType))                                                               \
     X(unsigned, clang_isRestrictQualifiedType, (CXType))                                                               \
     X(CXCursor, clang_getCanonicalCursor, (CXCursor))                                                                  \
-    X(CXCursor, clang_getCursorSemanticParent, (CXCursor))
+    X(CXCursor, clang_getCursorSemanticParent, (CXCursor))                                                             \
+    X(long long, clang_Type_getSizeOf, (CXType))                                                                       \
+    X(int, clang_Location_isInSystemHeader, (CXSourceLocation))                                                         \
+    X(unsigned, clang_Type_visitFields, (CXType, CXFieldVisitor, CXClientData))                                        \
+    X(unsigned, clang_Cursor_isBitField, (CXCursor))                                                                   \
+    X(unsigned, clang_Cursor_isAnonymousRecordDecl, (CXCursor))                                                        \
+    X(long long, clang_getEnumConstantDeclValue, (CXCursor))
 
 /* Functions niu does not call (yet), but whose presence shows that the
  * library is at least LLVM 17. LLVM 18 added no C API functions, so the
