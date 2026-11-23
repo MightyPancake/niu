@@ -77,6 +77,23 @@ static int niu_keyword_index(const char *s, const niu_tok *t)
     return -1;
 }
 
+/* Is prev the '.' or '->' of a member access? A keyword after one is a
+ * member name (s.defer, p->defer, .defer = 1). */
+static int niu_is_member_op(const char *s, const niu_tok *prev)
+{
+    size_t k, dashes = 0;
+    if (!prev || prev->kind != NIU_TOK_PUNCT)
+        return 0;
+    if (niu_tok_is(s, prev, "."))
+        return 1;
+    if (!niu_tok_is(s, prev, ">"))
+        return 0;
+    /* '->', not the '>' of '-->': an odd run of '-' right before the '>' */
+    for (k = prev->b; k > 0 && s[k - 1] == '-'; k--)
+        dashes++;
+    return dashes % 2 == 1;
+}
+
 static void niu_prepass_mark(niu_prepass *p, const niu_tok *t, int kw, int define)
 {
     niu_marker *m;
@@ -174,6 +191,8 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
 {
     niu_lexer lx;
     niu_toks dt = {0};
+    niu_tok prev = {0};
+    int have_prev = 0;
     memset(p, 0, sizeof *p);
     p->niu_h_off = niu_h_off;
     p->text = (char *)niu_xmalloc(len + 1);
@@ -187,6 +206,15 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
         int kw;
         if (t.kind == NIU_TOK_EOF)
             break;
+        if (!(t.bol && niu_tok_is(src, &t, "#"))) {
+            kw = niu_keyword_index(src, &t);
+            if (kw >= 0 && !niu_is_member_op(src, have_prev ? &prev : NULL))
+                niu_prepass_mark(p, &t, kw, -1);
+            prev = t;
+            have_prev = 1;
+            continue;
+        }
+        have_prev = 0;
         if (t.bol && niu_tok_is(src, &t, "#")) {
             /* A directive. Keywords are replaced only in #define bodies. */
             niu_tok *toks;
@@ -222,7 +250,7 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
                 }
                 for (k = body; k < nk; k++) {
                     kw = niu_keyword_index(src, &toks[k]);
-                    if (kw >= 0)
+                    if (kw >= 0 && !(k > body && niu_is_member_op(src, &toks[k - 1])))
                         niu_prepass_mark(p, &toks[k], kw, (int)p->n_defines);
                 }
                 if (p->n_markers > first) {
@@ -243,9 +271,6 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
             }
             continue;
         }
-        kw = niu_keyword_index(src, &t);
-        if (kw >= 0)
-            niu_prepass_mark(p, &t, kw, -1);
     }
     free(dt.items);
 }

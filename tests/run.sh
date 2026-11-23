@@ -670,6 +670,13 @@ defer_case "-Wniu-empty-defer-now" 0 \
     "x.c:5:5: warning: 'defer_now' has no pending defers to run [-Wniu-empty-defer-now]"
 defer_case "-Wno-niu-empty-defer-now turns it off" 0 "" -Wno-niu-empty-defer-now
 
+printf 'struct opts { int defer; int defer_now; };\n#include <stdio.h>\n#include <niu.h>\nint f(struct opts *p) {\n    struct opts o = { .defer = 1, .defer_now = 2 };\n    defer printf("%%d", o.defer);\n    return p->defer + p -> defer_now;\n}\n' >"$d/x.c"
+defer_case "after . or -> a keyword is a member name" 0 ""
+
+printf '%s\nint f(int x) {\n    return x-->defer;\n}\n' "$prelude" >"$d/x.c"
+defer_case "the > of --> is not a member access" 1 \
+    "x.c:5:16: error: 'defer' is a keyword in niu files and cannot be used as a name"
+
 printf '%s\nvoid f(void) {\n    defer\n}\n' "$prelude" >"$d/x.c"
 defer_case "a defer needs a statement" 1 \
     "x.c:5:5: error: expected a statement after 'defer'"

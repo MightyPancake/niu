@@ -12,6 +12,7 @@ Niu code lives in ordinary `.c` and `.h` files. A file becomes a *niu file* by i
 ```
 
 - **niu keywords only work in niu files,** from the `#include <niu.h>` line on. All other files (system headers, plain C files, headers that don't include `niu.h`) are passed to the compiler untouched, so they can keep using names like `defer`.
+- **Member names are not keywords.** Right after `.` or `->`, a word spelled like a niu keyword is a struct or union member, so a niu file can still use the members of plain structs: `o.defer`, `p->var` and the designated initializer `.var = 1` all work. Declaring such a member in a niu file is still an error, because there it is a keyword.
 - **A header that uses niu features includes `<niu.h>` itself.**
 - **`niu.h` is also a guard.** If a niu file is compiled by a plain C compiler instead of niu, `niu.h` stops the build with `#error "this file must be compiled with niu"`. Editors and other tools can define `__NIU_TOOLING__` to read niu files without niu.
 - **`niu.h` has three modes**, chosen by what is defined when it is read:
@@ -115,13 +116,13 @@ src/util.h: error: cannot write 'src/util.plain.h': the file exists and was not 
 ```
 
 ## Features
-Status: **TODO** means the feature is not specified yet, **Specified** means its chapter is written, and **Done** means it is specified and implemented.
+Status: **TODO** means the feature is not specified yet, **Draft** means its chapter is written but still has open questions, **Specified** means its chapter is written, and **Done** means it is specified and implemented.
 
 | Feature | Status | Summary |
 |---|---|---|
 | [`defer`](#defer-statement) | [Done](#defer-statement) | Run a cleanup statement on every exit from the current block. Includes `defer_now`, which runs the pending cleanups early, right before `exit` or `abort`. |
-| [`infer`](#infer) | TODO | Declare a variable whose type comes from its initializer. |
-| [`let`](#let) | TODO | Like `infer`, but the variable is `const`. |
+| [`var`](#var-and-let) | [Specified](#var-and-let) | Declare a variable whose type comes from its initializer. |
+| [`let`](#var-and-let) | [Specified](#var-and-let) | Like `var`, but the variable is `const`. |
 | [Generic types](#generic-types) | TODO | Define a type template once and use it with different types. |
 | [`__mangle`](#__mangle) | TODO | Turn a type into a name fragment for building identifiers. |
 | [Variable-length arrays](#variable-length-arrays) | TODO | VLAs in niu code without VLAs in the output. |
@@ -158,7 +159,7 @@ defer {
 }
 ```
 
-`defer` and `_Defer` (the spelling used by the TS) mean the same thing. `defer_now` and `_Defer_now` run the pending defers early (see Semantics). Like every niu keyword, they only work in niu files (see Source files). In niu files they are always keywords, so they cannot be used as names there (`int defer = 3;` is an error). Code that needs such a name can stay in a plain C file.
+`defer` and `_Defer` (the spelling used by the TS) mean the same thing. `defer_now` and `_Defer_now` run the pending defers early (see Semantics). Like every niu keyword, they only work in niu files (see Source files). In niu files they are keywords, so they cannot be used as names there (`int defer = 3;` is an error). The one exception is a member name right after `.` or `->` (`o.defer`), see Source files. Code that needs to declare such a name can stay in a plain C file.
 
 #### Constraints
 A program that breaks any of these rules is rejected with an error.
@@ -206,7 +207,7 @@ A program that breaks any of these rules is rejected with an error.
        return 0;         /* error: 'p' in the deferred statement would refer to the inner 'p' here */
    }
    ```
-   This applies to variables, functions, typedef names, tags and enum constants.
+   This applies to variables, functions, typedef names, tags and enum constants. It also applies to the names niu writes into the deferred statement itself, such as the type it writes for a `var` or `let` declaration (see "var and let"): that type must mean the same thing at every exit too.
 
 7. **No computed `goto` (`goto *ptr;`, a GNU extension) inside the scope of a defer.** niu cannot know where it lands.
 
@@ -623,18 +624,139 @@ niu also warns about code that is valid but probably a mistake:
 |---|---|
 | `defer_now` with no pending defers | `'defer_now' has no pending defers to run [-Wniu-empty-defer-now]` |
 
-### Infer
-TODO: declare a variable whose type comes from its initializer:
+### var and let
+`var` declares a variable whose type comes from its initializer. `let` does the same, but the variable itself is `const`:
 ```c
-infer a = add(1, 2);   /* a is an int */
+var n = strlen(s);     /* n is a size_t */
+var p = &x;            /* p is an int * */
+let q = &x;            /* q is an int *const */
 ```
-niu writes the inferred type out in the generated C.
+niu writes the type out in the generated C, so the output needs no type inference from the compiler and works with C99.
 
-### Let
-TODO: like `infer`, but the variable itself is `const`:
-```c
-let p = &x;            /* p is an int *const */
+#### Syntax
 ```
+var-declaration:
+    attributes(opt) storage-class-specifiers(opt) var identifier attributes(opt) = assignment-expression ;
+    attributes(opt) storage-class-specifiers(opt) let identifier attributes(opt) = assignment-expression ;
+```
+Attributes (`[[maybe_unused]]`, `__attribute__((unused))`) are kept as written.
+- `var` and `let` take the place of the type in an ordinary declaration. The name after them is a plain identifier: the type, including any `*`, `[]` or `()`, comes from the initializer.
+- One `var` or `let` declares one variable.
+- A `var` or `let` declaration declares a variable, and can appear where a variable declaration can: at file scope, in a block, and as the first clause of a `for` statement (`for (var i = 0; i < n; i++)`). It cannot declare anything else (see constraint 8).
+- Like every niu keyword, `var` and `let` only work in niu files, and in niu files they cannot be used as names (see Source files).
+
+#### Constraints
+A program that breaks any of these rules is rejected with an error.
+
+1. **There must be an initializer, and it must be an expression.** `var x;` has no type to take, and a brace initializer (`var a = {1, 2};`) has no type of its own. A compound literal is an expression, so `var a = (struct point){1, 2};` is fine.
+2. **One variable per declaration.** `var a = 1, b = 2.0;` is an error: write two declarations.
+3. **The name is a plain identifier.** `var *p = &x;`, `var a[] = ...` and `var f(void) = ...` are errors.
+4. **The variable cannot appear in its own initializer.** In `var x = x + 1;` the type of `x` is not known yet.
+5. **The type must be one niu can write.** niu writes the type out in C99, so a type without a name (an unnamed `struct`, `union` or `enum`) is an error. So is a variably modified type, such as a pointer to a variable-length array (`int (*)[n]`), because the output contains no VLAs. (The variable itself can never be an array: an array initializer becomes a pointer, see Semantics.)
+6. **Only storage-class specifiers and attributes can come with `var` or `let`.** The storage classes are `static`, `_Thread_local` and `register`. (`auto` is left out: C23 uses it for type inference too, which would only confuse.) `extern` and `typedef` are errors, since neither declares a variable with an initializer. Type specifiers and qualifiers are errors too (`const var x = 1;`): use `let` for a `const` variable. `_Alignas` is an error as well, because the alignment belongs to the type, and the type comes from the initializer: write the type out instead.
+7. **`var` and `let` cannot be used in a macro.** The type would differ at every use of the macro, and niu leaves macro uses as written. Ordinary macros inside a `var` declaration are fine: `var n = ARRAY_LEN(items);` takes the type of the expanded value.
+8. **`var` and `let` only declare variables.** They cannot declare a function parameter (`void f(var x)`), a struct or union member, or a function, and they cannot appear in a cast, `sizeof`, `_Alignof`, a compound literal's type or a function's return type.
+9. **The type must have a name that is visible where the variable is declared.** A declaration in an inner scope can hide a type's name there (see "Writing the type" under Semantics). If none of the type's names is visible, C99 has no way to write that type at that place, so it is an error:
+   ```c
+   struct S { int a; };
+   struct S *get_s(void);
+   void f(void) {
+       struct S { double d; };   /* hides the outer struct S */
+       var p = get_s();          /* error: 'struct S' means a different type here */
+   }
+   ```
+   To fix it, give the outer type a typedef name at file scope, or rename one of the structs.
+
+#### Semantics
+**The type is the type of the initializer, as a value.** It is the type the initializer has after the usual conversions that happen when a value is read:
+- an array becomes a pointer to its first element: `var s = "abc";` makes `s` a `char *`, and `var e = arr;` makes `e` an `int *` when `arr` is an `int[4]`;
+- a function becomes a pointer to the function: `var cb = handler;` makes `cb` a `void (*)(int)`;
+- qualifiers of the value itself are dropped: if `ci` is a `const int`, `var b = ci;` makes `b` a plain `int`. Qualifiers further in are kept: `var p = &ci;` makes `p` a `const int *`.
+
+**`let` adds `const` to the variable itself.** `let p = &x;` makes `p` an `int *const`: `p` cannot change, but `*p` can. `let s = "abc";` makes `s` a `char *const`.
+
+**The usual C rules decide the type, for the standard niu is run with.** `var` adds no rules of its own:
+- `var c = 'a';` makes `c` an `int`, since a character constant is an `int` in C. So does a comparison or a logical operator: `var b = x < y;` makes `b` an `int`.
+- Integer promotion applies: if `a` and `b` are `uint8_t`, `var s = a + b;` makes `s` an `int`.
+- `var t = true;` makes `t` an `int` under C99 to C17, where `true` is a macro for `1`, and a `bool` under C23, where it is a keyword.
+- `_Atomic` is a qualifier of the value too, so `var v = counter;` makes `v` a plain, non-atomic variable when `counter` is `_Atomic int`.
+
+**Typedef names are kept.** When the type of the initializer *is* a typedef name, the variable gets that name: `var n = strlen(s);` makes `n` a `size_t`, not `unsigned long`. This also holds through arithmetic and `?:` when the operands have that type: with two `size_t` operands, `a + b` and `k ? a : b` are `size_t`. When the type has no typedef name, niu writes the underlying type, which can differ between targets (`size_t` is `unsigned long` on 64-bit Linux, but `unsigned long long` on 64-bit Windows). Like all niu output, the result is for one configuration (see "The output is for one configuration" under Source files).
+
+**Writing the type.** niu writes the type with a name that means that type where the variable is declared. A declaration in an inner scope can hide a name: a local variable `S` hides the typedef `S`, and an inner `struct S` hides an outer one. niu tries the names of the type in this order, and uses the first one that is visible:
+1. the typedef name the type has, such as `S` or `size_t`;
+2. its tag, such as `struct S`;
+3. another typedef name for the same type that is visible there;
+4. for a typedef of a type that is not a `struct`, `union` or `enum`, the underlying type, such as `unsigned long` for `size_t`.
+
+If none of them is visible, constraint 9 makes it an error.
+
+**Later (TODO):** C23 and GNU C have `typeof`, which can name the type of any expression. When niu is run with `-std=c23` or a GNU standard, it could write `typeof(get_s()) p = get_s();` instead of reporting constraint 9, because the initializer's type can then always be written. That is left out for now. Adding it later only accepts programs that were errors before, so it breaks no existing code.
+```c
+typedef struct S { int a; } S;
+S get_s(void);
+void f(void) {
+    int S = 0;           /* hides the typedef S */
+    var p = get_s();     /* niu writes: struct S p = get_s(); */
+}
+```
+
+**Everything else is an ordinary declaration.** The variable is initialized, scoped and stored exactly as if its type had been written out. Assigning to a `let` variable is an error from the C compiler, the same as for any `const` variable.
+
+#### Lowering
+`var` or `let` and the name are replaced by the written-out declaration. Everything else, including the initializer, stays as written:
+```c
+var n = strlen(s);
+let p = &x;
+static var count = 0;
+for (var i = 0; i < n; i++) { }
+```
+becomes
+```c
+size_t n = strlen(s);
+int *const p = &x;
+static int count = 0;
+for (int i = 0; i < n; i++) { }
+```
+The `0` in the `for` loop is an `int`, so `i` is an `int` too, and a compiler warns about comparing it with the `size_t` `n` (`-Wsign-compare`). Write `var i = (size_t)0` to get a `size_t`.
+
+When the type is a pointer to a function or to an array, the name goes inside the declarator:
+```c
+var cb = handler;      /* void handler(int); */
+var row = &grid[0];    /* int grid[8][8]; */
+```
+becomes
+```c
+void (*cb)(int) = handler;
+int (*row)[8] = &grid[0];
+```
+For `let`, the `const` goes inside the declarator too, next to the name, so that the pointer itself is `const`:
+```c
+let cb = handler;      /* void (*const cb)(int) = handler; */
+let row = &grid[0];    /* int (*const row)[8] = &grid[0]; */
+```
+The written-out declaration stays on the line of the original, so line numbers and `__LINE__` do not change. Only the columns after it on that line move.
+
+#### Editor tools
+Under `__NIU_TOOLING__`, `niu.h` defines `var` as `__auto_type` and `let` as `__auto_type const`. These stubs are only for editor tools: the generated C never contains `__auto_type`, because niu writes the type out.
+- C99 has no way to infer a type, so the stubs need an extension. Tools based on Clang or GCC (clangd, for example) understand `__auto_type` and show the inferred types. Tools that do not know it, such as MSVC IntelliSense, report errors on `var` and `let` lines.
+- With `-pedantic`, Clang warns that `__auto_type` is a GNU extension. In tooling mode, `niu.h` turns that warning off with `#pragma clang diagnostic ignored "-Wgnu-auto-type"`, only when `__clang__` is defined. GCC does not give this warning.
+- `__auto_type` accepts more than niu does: several variables in one declaration, unnamed types and variable-length array types. Editor tools do not flag those, but niu rejects them.
+
+#### Diagnostics
+| Constraint | Message |
+|---|---|
+| 1 | `'var' requires an initializer`, `'var' cannot take a brace initializer; write the type instead` |
+| 2 | `'var' declares a single variable` |
+| 3 | `the name after 'var' must be a plain identifier; its type comes from the initializer` |
+| 4 | `'x' cannot appear in its own initializer` |
+| 5 | `the type of 'x' has no name, so niu cannot write it out`, `the type of 'x' is a variably modified type, which niu cannot write out` |
+| 6 | `'var' cannot be used with 'extern'`, `'var' cannot be used with 'typedef'`, `'var' takes the place of the type; use 'let' for a 'const' variable`, `'var' cannot be used with '_Alignas'; write the type out instead` |
+| 7 | `'var' cannot be used in a macro` |
+| 8 | `'var' can only declare a variable` |
+| 9 | `the type of 'p' cannot be written here: 'struct S' means a different type in this scope`, with a note at the declaration that hides it |
+
+Each message names the keyword that was used (`var` or `let`).
 
 ### Generic types
 TODO: define a type template once and use it with different types:
