@@ -14,6 +14,14 @@ Niu code lives in ordinary `.c` and `.h` files. A file becomes a *niu file* by i
 - **niu keywords only work in niu files,** from the `#include <niu.h>` line on. All other files (system headers, plain C files, headers that don't include `niu.h`) are passed to the compiler untouched, so they can keep using names like `defer`.
 - **A header that uses niu features includes `<niu.h>` itself.**
 - **`niu.h` is also a guard.** If a niu file is compiled by a plain C compiler instead of niu, `niu.h` stops the build with `#error "this file must be compiled with niu"`. Editors and other tools can define `__NIU_TOOLING__` to read niu files without niu.
+- **`niu.h` has three modes**, chosen by what is defined when it is read:
+
+  | Defined | Used by | What `niu.h` does |
+  |---|---|---|
+  | `__NIU_STD__` | niu itself, which defines it while it reads a file | Declares `enum { $ };`, which niu uses internally to find its keywords (see "Reserved names" below). The niu keywords are not macros here. niu handles them itself. |
+  | `__NIU_TOOLING__` | editors, clangd, linters | Defines each niu keyword as a macro stub that parses but does not do what niu does: `defer` and `_Defer` become `if (0)`, `defer_now` and `_Defer_now` become `((void)0)`. See "Editor tools" below. |
+  | neither | a plain C compiler | Stops with `#error "this file must be compiled with niu"`. |
+- **Reserved names.** In a niu file, identifiers starting with `__niu` are reserved, because niu generates names with this prefix. The identifier `$` is reserved too, because `niu.h` declares it. Declaring `$` yourself (as a variable, function, parameter, typedef or enum constant) or defining an object-like macro named `$` is an error. A function-like macro `$(x)`, a tag, a struct member or a label named `$`, and names that only contain a `$` (such as `sys$open`), are fine. Plain files are not affected.
 - **The generated C does not need niu.** In the output, niu replaces the `#include <niu.h>` line with a comment, so the result compiles with any C compiler.
 - **Being a niu file does not spread.** A file that gets `niu.h` only indirectly, through another header, is still a plain C file. Every niu file includes `<niu.h>` itself.
 - **Include plain headers first.** In a niu file, plain C headers (system headers included) should be included before any niu header and before `<niu.h>`. See "Editor tools" below for why.
@@ -90,6 +98,11 @@ util.h: error: 'util.h' would be lowered differently for main.c and other.c
 src/util.niu.h: warning: 'util.niu.h' is named like a niu file but does not include <niu.h> [-Wniu-file-name]
 ```
 
+**Transpiling a plain file (warning, `-Wniu-plain-file`).** `niu transpile` on a file that does not include `<niu.h>` writes an unchanged copy, which is usually a mistake. `niu check` does not give this warning:
+```
+src/app.c: warning: 'app.c' is not a niu file (it does not include <niu.h>), so 'app.plain.c' is an unchanged copy [-Wniu-plain-file]
+```
+
 **Include of a niu file that cannot be renamed (error).** niu can only rename includes whose file name is written out literally. An include whose name comes from a macro (`#include CONFIG_HEADER`), or a `__has_include` check, that refers to a niu file is reported:
 ```
 src/main.c:4:10: error: cannot rename this include of the niu file 'util.h': its name comes from the macro 'CONFIG_HEADER'
@@ -106,7 +119,7 @@ Status: **TODO** means the feature is not specified yet, **Specified** means its
 
 | Feature | Status | Summary |
 |---|---|---|
-| [`defer`](#defer-statement) | [Specified](#defer-statement) | Run a cleanup statement on every exit from the current block. Includes `defer_now`, which runs the pending cleanups early, right before `exit` or `abort`. |
+| [`defer`](#defer-statement) | [Done](#defer-statement) | Run a cleanup statement on every exit from the current block. Includes `defer_now`, which runs the pending cleanups early, right before `exit` or `abort`. |
 | [`infer`](#infer) | TODO | Declare a variable whose type comes from its initializer. |
 | [`let`](#let) | TODO | Like `infer`, but the variable is `const`. |
 | [Generic types](#generic-types) | TODO | Define a type template once and use it with different types. |
@@ -197,7 +210,7 @@ A program that breaks any of these rules is rejected with an error.
 
 7. **No computed `goto` (`goto *ptr;`, a GNU extension) inside the scope of a defer.** niu cannot know where it lands.
 
-8. **Identifiers starting with `__niu` are reserved.** niu generates names with this prefix, so declaring one yourself is an error.
+8. **Identifiers starting with `__niu`, and the identifier `$`, are reserved.** niu generates names with the `__niu` prefix, and it uses `$` internally to find its keywords. Declaring either yourself is an error. See "Reserved names" under Source files for exactly which uses of `$` are allowed.
 
 9. **After `defer_now`, control must not reach an exit that would run the same defers again.** Every path from a `defer_now` must end in a call to a `noreturn` function (`exit`, `abort`, `longjmp`, or a function declared `_Noreturn`, `[[noreturn]]` or `__attribute__((noreturn))`) before it reaches the end of a block, a `return`, `break`, `continue` or `goto` that would run any of the defers it already ran. Otherwise those defers would run twice.
    ```c
@@ -229,6 +242,33 @@ A program that breaks any of these rules is rejected with an error.
     For the same reason, `__COUNTER__` cannot be used in a deferred statement: it would have a different value in every copy. (`__LINE__` is fine, see "Line numbers in copies" under Lowering.)
 
 A defer inside a deferred statement is allowed. Its scope is the deferred statement, and all the rules above apply to it as well.
+
+#### Macros
+niu leaves every macro use as written, and it cannot edit the text a macro expands to. That leads to these rules:
+
+- **An exit that comes from a macro cannot leave the scope of a defer.** niu would have to add the copies inside the macro's expansion:
+  ```c
+  #define CHECK(x) if (!(x)) return -1
+  defer free(p);
+  CHECK(p != NULL);       /* error: the 'return' comes from the macro 'CHECK' */
+  ```
+  Exits from macros that no defer covers are fine, and so are exits from macros used inside a deferred statement when they stay inside it.
+- **A defer can be the last statement of a macro.** The defer runs at the exits of the block where the macro is used, as if it had been written there:
+  ```c
+  #define AUTOFREE(p) defer free(p)
+  #define WITH_LOG(s) log_enter(s); defer log_leave(s)
+
+  char *buf = malloc(64);
+  AUTOFREE(buf);          /* free(buf) runs at every exit of this block */
+  ```
+  Such a macro must follow these rules:
+  - It can contain only one `defer`, and that `defer` must be its last statement. The deferred statement runs to the end of the macro.
+  - The deferred statement cannot contain another `defer`, nor `defer_now`.
+  - The macro must be defined in the niu file itself, and used directly in the code, not from inside another macro.
+- **A macro can stand for the keyword alone.** `#define DEFER defer` works like `defer`. The deferred statement is then written out after the macro's use (`DEFER free(p);`), not taken from another macro.
+- **`defer_now` cannot be used in a macro.**
+
+Any other macro that contains a niu keyword is an error.
 
 #### Semantics
 **When a defer runs.** A defer is registered when execution reaches it. It runs when execution leaves its scope (from the defer statement to the end of the block) by any of these:
@@ -492,6 +532,34 @@ becomes
     return __niu_return_temp; }
 ```
 
+**A macro that contains a defer** keeps its name and every use as written. niu comments out the defer part of the `#define`, and adds a *companion macro* `__niu_defer_<NAME>` before it, with the same parameters and the deferred statement as its body. A `#line` directive after the companion keeps the line numbers of the original `#define`. Each copy is a use of the companion macro, with the arguments of the original use, so it goes on its own lines between `#line` directives:
+```c
+26  #define AUTOFREE(p) defer free(p)
+    ...
+38      char *buf = malloc(8);
+39      AUTOFREE(buf);
+40      if (!ok)
+41          return -1;
+```
+becomes
+```c
+#define __niu_defer_AUTOFREE(p) free(p)
+#line 26 "main.c"
+#define AUTOFREE(p) /* defer free(p) */
+    ...
+    char *buf = malloc(8);
+    AUTOFREE(buf);
+    if (!ok)
+        { int __niu_return_temp = -1;
+#line 39 "main.c"
+    __niu_defer_AUTOFREE(buf);
+#line 41 "main.c"
+        return __niu_return_temp; }
+```
+A macro that stands for the keyword alone (`#define DEFER defer`) becomes `#define DEFER /* defer */`. Its defers are lowered like any other, with the statement written after the use as the deferred statement.
+
+**Types without a name.** A temporary for a returned value or a statement expression's value needs a type that can be written down. If that type has no name (for example an unnamed `struct` returned by a function, or the value of `({ ... })` having one), niu reports an error instead of lowering the code. Give the type a tag or a typedef name.
+
 **`defer_now`** becomes the copies a `return` at the same place would get, and nothing else:
 ```c
 if (!valid(buf)) {
@@ -507,17 +575,47 @@ niu reports each broken constraint as an error at the offending location, and po
 |---|---|
 | 1 | `'defer' must appear directly inside a block '{ }'` |
 | 2 | `'return' cannot leave a deferred statement` (and the same for `break`, `continue`, `goto`) |
-| 3 | `'goto' jumps into the scope of a 'defer'`, `'case' label is inside the scope of a 'defer'` |
+| 3 | `'goto' jumps into the scope of a 'defer'`, `'case' label is inside the scope of a 'defer'`, `'default' label is inside the scope of a 'defer'` |
 | 4 | `labels are not allowed in a deferred statement` |
-| 5 | `'static' variables are not allowed in a deferred statement` |
+| 5 | `'static' variables are not allowed in a deferred statement`, `'_Thread_local' variables are not allowed in a deferred statement` |
 | 6 | `'p' in this deferred statement would refer to a different declaration at this exit`, with a note at the inner declaration |
 | 7 | `computed 'goto' is not allowed in the scope of a 'defer'` |
-| 8 | `identifiers starting with '__niu' are reserved` |
+| 8 | `identifiers starting with '__niu' are reserved`, `'$' is reserved in niu files` |
 | 9 | `control can leave the scope of a 'defer' after 'defer_now'; its cleanup would run twice`, with a note at the `defer_now` |
 | 10 | `'defer_now' cannot appear inside a deferred statement` |
 | 11 | `'LOG' is redefined while a deferred statement that uses it is still pending`, with a note at the defer; `'__COUNTER__' cannot be used in a deferred statement` |
 
 Errors in the deferred statement itself (for example a misspelled name) are reported once, at the defer, not once per copy.
+
+Wrong uses of the keywords themselves:
+
+| Situation | Message |
+|---|---|
+| A keyword used as a name (`int defer = 3;`) | `'defer' is a keyword in niu files and cannot be used as a name` |
+| Nothing after `defer` | `expected a statement after 'defer'` |
+| `else` after a defer statement | `'else' without a previous 'if'` |
+| `defer_now` without its `;` | `expected ';' after 'defer_now'` |
+| `defer_now` inside an expression | `'defer_now' must be a statement of its own` |
+
+Macros (see "Macros" above):
+
+| Situation | Message |
+|---|---|
+| An exit from a macro leaves the scope of a defer | `'return' comes from the macro 'CHECK' and leaves the scope of a 'defer'; niu cannot add the cleanup there` (and the same for `break`, `continue`, `goto`), with a note at the defer |
+| More than one defer in a macro | `a macro can contain only one 'defer', as its last statement` |
+| The defer is not the macro's last statement | `the 'defer' must be the last statement in the macro 'NAME'` |
+| A defer inside the deferred statement of a macro | `a 'defer' in a macro cannot contain another 'defer'` |
+| `defer_now` in a macro | `'defer_now' cannot be used in a macro` |
+| The macro is used from another macro | `the macro 'NAME' contains a 'defer', so it must be used directly, not from another macro`, with a note at the `#define` |
+| `DEFER` followed by a statement that comes from a macro | `the statement after 'DEFER' must be written out, not come from a macro` |
+| A defer from a macro defined outside the niu file | `this 'defer' comes from a macro niu cannot find` |
+
+Types without a name (see Lowering):
+
+| Situation | Message |
+|---|---|
+| A function returning an unnamed type | `the return type of 'f' has no name, so niu cannot store the returned value while the defers run` |
+| A statement expression with an unnamed type | `the value of this statement expression has a type without a name, so niu cannot store it while the defers run` |
 
 niu also warns about code that is valid but probably a mistake:
 

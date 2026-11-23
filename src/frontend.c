@@ -204,8 +204,10 @@ static void niu_print_diagnostic(CXDiagnostic d)
 
 /* Prints libclang's diagnostics; returns the number of errors. A
  * diagnostic on a niu keyword is left out: it is about the C the pre-pass
- * put there, and niu reports what is wrong with the keyword itself. */
-static int niu_report_diagnostics(CXTranslationUnit tu, niu_prepass *pp, CXFile main_file)
+ * put there, and niu reports what is wrong with the keyword itself. So is
+ * one at the offsets in skip, where niu reports a reserved '$'. */
+static int niu_report_diagnostics(CXTranslationUnit tu, niu_prepass *pp, CXFile main_file, const size_t *skip,
+                                  size_t n_skip)
 {
     unsigned i, n = cx.clang_getNumDiagnostics(tu);
     int errors = 0;
@@ -215,9 +217,14 @@ static int niu_report_diagnostics(CXTranslationUnit tu, niu_prepass *pp, CXFile 
         CXFile f = NULL;
         unsigned line, col, off = 0;
         cx.clang_getExpansionLocation(cx.clang_getDiagnosticLocation(d), &f, &line, &col, &off);
-        if (pp->n_markers && f && main_file && cx.clang_File_isEqual(f, main_file) && niu_marker_covering(pp, off)) {
-            cx.clang_disposeDiagnostic(d);
-            continue;
+        if (f && main_file && cx.clang_File_isEqual(f, main_file)) {
+            size_t k;
+            for (k = 0; k < n_skip && skip[k] != off; k++)
+                ;
+            if (k < n_skip || (pp->n_markers && niu_marker_covering(pp, off))) {
+                cx.clang_disposeDiagnostic(d);
+                continue;
+            }
         }
         if (sev == CXDiagnostic_Error || sev == CXDiagnostic_Fatal)
             errors++;
@@ -405,7 +412,6 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
         dc.pp = &u->pp;
         dc.no_line = o->no_line;
         dc.warn_empty_defer_now = o->warn_empty_defer_now;
-        u->errors += niu_report_diagnostics(u->tu, &u->pp, main_file);
         if (u->is_niu_file) {
             /* every `#include <niu.h>` line becomes a comment */
             for (i = 0; i < u->n_niu_h; i++) {
@@ -413,8 +419,11 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
                 niu_ledit_text(&dc, -1, b, e, niu_comment_out(src + b, e - b));
             }
             niu_defer_analyze(&dc);
+            u->errors += niu_report_diagnostics(u->tu, &u->pp, main_file, dc.clang_skip, dc.n_clang_skip);
             niu_print_ddiags(&dc);
             u->errors += dc.errors;
+        } else {
+            u->errors += niu_report_diagnostics(u->tu, &u->pp, main_file, NULL, 0);
         }
         if (!u->is_niu_file && niu_has_niu_name(o->input) && o->warn_file_name)
             niu_message_at(o->input, "warning",

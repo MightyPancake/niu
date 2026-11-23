@@ -17,7 +17,12 @@
 /* Read by niu itself: the niu keywords are not macros. niu's pre-pass puts
  * code that refers to $ where each keyword is, to find them in the AST. */
 #pragma clang system_header
+/* $ is reserved in niu files; niu reports a macro named $ itself, so it is
+ * set aside here, where it would only add errors about this header. */
+#pragma push_macro("$")
+#undef $
 enum { $ };
+#pragma pop_macro("$")
 #elif defined(__NIU_TOOLING__)
 /* Stubs for editor tools. A deferred statement is kept behind `if (0)`, so it
  * is still parsed and checked, but analysers do not see it run early (for

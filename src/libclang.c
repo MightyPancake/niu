@@ -127,6 +127,7 @@ typedef enum CXChildVisitResult (*CXCursorVisitor)(CXCursor cursor, CXCursor par
     X(unsigned, clang_equalTypes, (CXType, CXType))                                                                    \
     X(int, clang_Cursor_getStorageClass, (CXCursor))                                                                   \
     X(int, clang_getCursorTLSKind, (CXCursor))                                                                         \
+    X(unsigned, clang_Cursor_isMacroFunctionLike, (CXCursor))                                                          \
     X(const char *, clang_getFileContents, (CXTranslationUnit, CXFile, size_t *))
 
 /* Functions niu does not call (yet), but whose presence shows that the

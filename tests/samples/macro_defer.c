@@ -30,6 +30,8 @@ static int check(const char *want)
 #define CLEANUP defer L("k")
 #define END }
 #define UNUSED(x) defer x
+#define ID(x) (x)
+#define ZERO 0
 
 static int f(int ok)
 {
@@ -50,6 +52,15 @@ static void g(void)
     L("=");
 END
 
+/* a returned value that ends in a macro use */
+static int h(int v)
+{
+    DEFER L("h");
+    if (v)
+        return ID(v) * ID(2);
+    return ZERO;
+}
+
 int main(void)
 {
     int ok = 1;
@@ -57,6 +68,8 @@ int main(void)
     ok &= f(1) == 0 && check("+w=k-wd");
     g();
     ok &= check("+g=-g");
+    ok &= h(3) == 6 && check("h");
+    ok &= h(0) == 0 && check("h");
     printf("%s\n", ok ? "ok" : "FAILED");
     return ok ? 0 : 1;
 }

@@ -40,6 +40,8 @@ static int check(const char *want)
 #define __niu_defer_UNUSED(x) x
 #line 32 "macro_defer.c"
 #define UNUSED(x) /* defer x */
+#define ID(x) (x)
+#define ZERO 0
 
 static int f(int ok)
 {
@@ -50,27 +52,27 @@ static int f(int ok)
     CLEANUP;
     if (!ok)
         { int __niu_return_temp = -1;
-#line 40 "macro_defer.c"
-    __niu_defer_CLEANUP;
-#line 39 "macro_defer.c"
-    __niu_defer_WITH_LOG("w");
-#line 38 "macro_defer.c"
-    L("d");
-#line 37 "macro_defer.c"
-    __niu_defer_AUTOFREE(buf);
 #line 42 "macro_defer.c"
+    __niu_defer_CLEANUP;
+#line 41 "macro_defer.c"
+    __niu_defer_WITH_LOG("w");
+#line 40 "macro_defer.c"
+    L("d");
+#line 39 "macro_defer.c"
+    __niu_defer_AUTOFREE(buf);
+#line 44 "macro_defer.c"
         return __niu_return_temp; } /* k -w d, free(buf) */
     L("=");
     { int __niu_return_temp = 0;
-#line 40 "macro_defer.c"
+#line 42 "macro_defer.c"
     __niu_defer_CLEANUP;
-#line 39 "macro_defer.c"
+#line 41 "macro_defer.c"
     __niu_defer_WITH_LOG("w");
-#line 38 "macro_defer.c"
+#line 40 "macro_defer.c"
     L("d");
-#line 37 "macro_defer.c"
+#line 39 "macro_defer.c"
     __niu_defer_AUTOFREE(buf);
-#line 44 "macro_defer.c"
+#line 46 "macro_defer.c"
     return __niu_return_temp; }
 }
 
@@ -79,10 +81,19 @@ static void g(void)
     WITH_LOG("g");
     L("=");
 
-#line 49 "macro_defer.c"
-    __niu_defer_WITH_LOG("g");
 #line 51 "macro_defer.c"
+    __niu_defer_WITH_LOG("g");
+#line 53 "macro_defer.c"
 END
+
+/* a returned value that ends in a macro use */
+static int h(int v)
+{
+    /* DEFER L("h"); */
+    if (v)
+        { int __niu_return_temp = ID(v) * ID(2); L("h"); return __niu_return_temp; }
+    { int __niu_return_temp = ZERO; L("h"); return __niu_return_temp; }
+}
 
 int main(void)
 {
@@ -91,6 +102,8 @@ int main(void)
     ok &= f(1) == 0 && check("+w=k-wd");
     g();
     ok &= check("+g=-g");
+    ok &= h(3) == 6 && check("h");
+    ok &= h(0) == 0 && check("h");
     printf("%s\n", ok ? "ok" : "FAILED");
     return ok ? 0 : 1;
 }

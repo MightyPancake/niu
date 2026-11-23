@@ -203,6 +203,9 @@ typedef struct {
     size_t *line_starts;       /* offsets where lines start, made on first use */
     size_t n_lines;
     int internal_error;
+    size_t *clang_skip; /* offsets where libclang's errors are left out: niu reports them */
+    size_t n_clang_skip;
+    size_t n_dollar; /* declarations or macros named '$' (reserved) */
 
     niu_strlist typedef_names; /* every file-scope typedef ... */
     CXCursor *typedefs;        /* ... and its declaration */
@@ -513,15 +516,24 @@ static int niu_needs_semicolon(niu_node *n)
 }
 
 /* The end of a statement including its ';'. */
+/* The end of a node that ends in a macro use: libclang gives the use's start
+ * as the (expansion) end of the macro's last token, so `return ID(v)` would
+ * end before `ID`. The node then goes on to the end of the use. */
+static size_t niu_end_of(niu_dctx *c, niu_node *n)
+{
+    niu_expansion *x = niu_expansion_at(c, n->e);
+    return x && x->b == n->e ? x->e : n->e;
+}
+
 static size_t niu_stmt_end(niu_dctx *c, niu_node *n)
 {
-    size_t k;
+    size_t k, e = niu_end_of(c, n);
     if (!niu_needs_semicolon(n))
-        return n->e;
-    k = niu_next_code(c->src, c->len, n->e);
+        return e;
+    k = niu_next_code(c->src, c->len, e);
     if (k < c->len && c->src[k] == ';')
         return k + 1;
-    return n->e;
+    return e;
 }
 
 /* The offset of a compound statement's '}' (or of the macro use it comes
@@ -704,6 +716,43 @@ static char *niu_type_for_temp(CXType t, int *is_void, int *unnamed)
     return s;
 }
 
+/* ---- '$' ----
+ * The pre-pass writes `if($)` and `((void)$)`, and niu.h declares the $
+ * they refer to. A $ of the file's own would clash with it or hide it, so a
+ * declaration of $ in the ordinary name space, or an object-like macro $, is
+ * an error. */
+
+/* libclang's errors at off are left out: niu reports the problem there. */
+static void niu_skip_clang(niu_dctx *c, size_t off)
+{
+    c->clang_skip = (size_t *)niu_xrealloc(c->clang_skip, (c->n_clang_skip + 1) * sizeof *c->clang_skip);
+    c->clang_skip[c->n_clang_skip++] = off;
+}
+
+static void niu_dollar_reserved(niu_dctx *c, size_t off)
+{
+    if (off == (size_t)-1)
+        return;
+    niu_ddiag(c, "error", off, "'$' is reserved in niu files");
+    niu_skip_clang(c, off);
+    c->n_dollar++;
+}
+
+static void niu_check_dollar(niu_dctx *c, niu_node *n)
+{
+    size_t i;
+    int k = n->kind;
+    if (k == NIU_K_VAR_DECL || k == NIU_K_FUNCTION_DECL || k == NIU_K_PARM_DECL || k == NIU_K_TYPEDEF_DECL ||
+        k == NIU_K_ENUM_CONSTANT_DECL) {
+        char *name = niu_cxstr(cx.clang_getCursorSpelling(n->cur));
+        if (strcmp(name, "$") == 0)
+            niu_dollar_reserved(c, niu_cursor_off(c, n->cur));
+        free(name);
+    }
+    for (i = 0; i < n->nkids; i++)
+        niu_check_dollar(c, n->kids[i]);
+}
+
 /* ---- macros ---- */
 
 typedef struct {
@@ -718,6 +767,9 @@ static enum CXChildVisitResult niu_macro_visit(CXCursor cur, CXCursor parent, CX
     if (k == NIU_K_MACRO_DEFINITION) {
         char *name = niu_cxstr(cx.clang_getCursorSpelling(cur));
         size_t i;
+        /* `#define $(x) ...` is fine: `if($)` has no '(' after the '$' */
+        if (strcmp(name, "$") == 0 && !cx.clang_Cursor_isMacroFunctionLike(cur))
+            niu_dollar_reserved(c, niu_cursor_off(c, cur));
         for (i = 0; i < c->macro_names.count; i++)
             if (strcmp(c->macro_names.items[i], name) == 0)
                 break;
@@ -1731,7 +1783,7 @@ static void niu_analyze_node(niu_dctx *c, niu_node *n)
             if (type && !is_void) {
                 niu_ledit *l = niu_ledit_new(c, NIU_L_VALUE, niu_owner_of(n), last->b, niu_stmt_end(c, last));
                 l->xb = last->b;
-                l->xe = last->e;
+                l->xe = niu_end_of(c, last);
                 l->decl = niu_declarator(type, "__niu_value_temp");
                 l->copies = copies;
                 copies.items = NULL;
@@ -1790,7 +1842,7 @@ static void niu_analyze_node(niu_dctx *c, niu_node *n)
             l = niu_ledit_new(c, NIU_L_RETURN, niu_owner_of(n), n->b, niu_stmt_end(c, n));
             if (val) {
                 l->xb = val->b;
-                l->xe = val->e;
+                l->xe = niu_end_of(c, val);
                 if (is_void)
                     l->void_value = 1;
                 else
@@ -1820,7 +1872,7 @@ static void niu_analyze_node(niu_dctx *c, niu_node *n)
         if (niu_check_exit(c, n, n, n->b, &copies, niu_jump_word(n->kind))) {
             niu_ledit *l = niu_ledit_new(c, NIU_L_JUMP, niu_owner_of(n), n->b, niu_stmt_end(c, n));
             l->xb = n->b;
-            l->xe = n->e;
+            l->xe = niu_end_of(c, n);
             l->copies = copies;
             copies.items = NULL;
         }
@@ -1871,7 +1923,7 @@ static void niu_analyze_node(niu_dctx *c, niu_node *n)
         if (niu_check_exit(c, n, n, n->b, &copies, "goto")) {
             niu_ledit *le = niu_ledit_new(c, NIU_L_JUMP, niu_owner_of(n), n->b, niu_stmt_end(c, n));
             le->xb = n->b;
-            le->xe = n->e;
+            le->xe = niu_end_of(c, n);
             le->copies = copies;
             copies.items = NULL;
         }
@@ -2027,14 +2079,19 @@ static void niu_check_unmatched(niu_dctx *c)
         }
         {
             /* used as a name if a type or declarator comes right before it */
-            size_t k = m->off;
+            size_t k = m->off, after;
             int as_name = 0;
             while (k > 0 && (c->src[k - 1] == ' ' || c->src[k - 1] == '\t' || c->src[k - 1] == '\n' ||
                              c->src[k - 1] == '\r'))
                 k--;
             if (k > 0 && (niu_is_ident_char(c->src[k - 1]) || c->src[k - 1] == '*' || c->src[k - 1] == ','))
                 as_name = 1;
-            if (in_function || as_name || m->kind == NIU_MARK_DEFER_NOW)
+            after = niu_next_code(c->src, c->len, m->off + m->len);
+            /* `defer }`: libclang leaves the broken statement out of the AST */
+            if (in_function && !as_name && m->kind != NIU_MARK_DEFER_NOW && (after >= c->len || c->src[after] == '}')) {
+                niu_ddiag(c, "error", m->off, "expected a statement after '%s'", m->spelling);
+                niu_skip_clang(c, after);
+            } else if (in_function || as_name || m->kind == NIU_MARK_DEFER_NOW)
                 niu_ddiag(c, "error", m->off, "'%s' is a keyword in niu files and cannot be used as a name",
                           m->spelling);
             else
@@ -2104,6 +2161,12 @@ static void niu_defer_analyze(niu_dctx *c)
     cx.clang_visitChildren(cx.clang_getTranslationUnitCursor(c->tu), niu_macro_visit, &mv);
     tc.c = c;
     cx.clang_visitChildren(cx.clang_getTranslationUnitCursor(c->tu), niu_top_visit, &tc);
+    for (i = 0; i < c->functions.count; i++)
+        niu_check_dollar(c, c->functions.items[i]);
+    /* With a $ of the file's own the markers cannot be trusted: everything
+     * else would only be errors that follow from this one. */
+    if (c->n_dollar)
+        return;
     niu_mark_nodes(c);
     niu_check_unmatched(c);
     niu_make_defers(c);
@@ -2133,6 +2196,7 @@ static void niu_dctx_free(niu_dctx *c)
         free(c->exps[i].name);
     free(c->exps);
     niu_strlist_free(&c->macro_names);
+    free(c->clang_skip);
     free(c->macro_defs);
     for (i = 0; i < c->n_defers; i++) {
         size_t k;

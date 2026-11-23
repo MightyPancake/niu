@@ -618,6 +618,22 @@ printf '%s\nint __niu_mine;\n' "$prelude" >"$d/x.c"
 defer_case "8: __niu names are reserved" 1 \
     "x.c:4:5: error: identifiers starting with '__niu' are reserved"
 
+# '$' is what niu's markers refer to (niu.h declares it)
+printf '%s\nint $;\nint main(void) { defer puts("x"); return 0; }\n' "$prelude" >"$d/x.c"
+defer_case "a file-scope \$ is reserved" 1 \
+    "x.c:4:5: error: '\$' is reserved in niu files"
+
+printf '%s\nint f(int $) {\n    int v = $;\n    defer puts("x");\n    return v;\n}\n' "$prelude" >"$d/x.c"
+defer_case "a parameter named \$ is reserved" 1 \
+    "x.c:4:11: error: '\$' is reserved in niu files"
+
+printf '#define $ 1\n%s\nint main(void) { defer puts("x"); return $; }\n' "$prelude" >"$d/x.c"
+defer_case "an object-like macro \$ is reserved, even before niu.h" 1 \
+    "x.c:1:9: error: '\$' is reserved in niu files"
+
+printf '%s\n#define $(x) (x)\nstruct $ { int $; };\nint main(void) {\n    struct $ s;\n    s.$ = 0;\n    defer puts("x");\n    return $(s.$);\n}\n' "$prelude" >"$d/x.c"
+defer_case "a function-like macro, tag or member named \$ is fine" 0 ""
+
 # spec.md, constraint 9
 printf '%s\nvoid log_error(const char *);\nvoid f(int bad, int worse) {\n    char *p = malloc(8);\n    defer free(p);\n    if (bad) {\n        defer_now;\n        fprintf(stderr, "fatal\\n");\n        exit(1);\n    }\n    if (worse) {\n        defer_now;\n        log_error("worse");\n    }\n}\n' "$prelude" >"$d/x.c"
 defer_case "9: control continues after defer_now" 1 \
@@ -653,6 +669,10 @@ printf '%s\nvoid f(void) {\n    defer_now;\n}\n' "$prelude" >"$d/x.c"
 defer_case "-Wniu-empty-defer-now" 0 \
     "x.c:5:5: warning: 'defer_now' has no pending defers to run [-Wniu-empty-defer-now]"
 defer_case "-Wno-niu-empty-defer-now turns it off" 0 "" -Wno-niu-empty-defer-now
+
+printf '%s\nvoid f(void) {\n    defer\n}\n' "$prelude" >"$d/x.c"
+defer_case "a defer needs a statement" 1 \
+    "x.c:5:5: error: expected a statement after 'defer'"
 
 printf '%s\nvoid f(void) {\n    int defer = 3;\n    (void)defer;\n}\n' "$prelude" >"$d/x.c"
 defer_case "a niu keyword cannot be a name in a niu file" 1 \
