@@ -22,6 +22,7 @@ static void niu_usage(FILE *f)
           "                      no warning for a defer_now with no pending defers\n"
           "  -Wno-niu-v-no-format\n"
           "                      no warning for a %v passed to a function niu does not know as printf-style\n"
+          "  -Wno-niu-inactive   no warning for niu code in an #if branch that is not active (transpile only)\n"
           "  -v                  show which libclang is used and how it is called\n"
           "  --version           show the versions of niu and libclang\n"
           "\n"
@@ -49,6 +50,7 @@ static int niu_parse_options(int argc, char **argv, niu_options *o)
     o->warn_plain_file = 1;
     o->warn_empty_defer_now = 1;
     o->warn_v_no_format = 1;
+    o->warn_inactive = 1;
     for (i = 0; i < argc; i++) {
         const char *a = argv[i];
         if (!only_files && a[0] == '-' && a[1] != '\0') {
@@ -83,6 +85,10 @@ static int niu_parse_options(int argc, char **argv, niu_options *o)
                 o->warn_v_no_format = 0;
             } else if (strcmp(a, "-Wniu-v-no-format") == 0) {
                 o->warn_v_no_format = 1;
+            } else if (strcmp(a, "-Wno-niu-inactive") == 0) {
+                o->warn_inactive = 0;
+            } else if (strcmp(a, "-Wniu-inactive") == 0) {
+                o->warn_inactive = 1;
             } else if (strcmp(a, "-v") == 0 || strcmp(a, "--verbose") == 0) {
                 o->verbose = 1;
             } else {
@@ -110,6 +116,7 @@ static int niu_run(int argc, char **argv, int write_output)
         niu_strlist_free(&o.user_args);
         return rc;
     }
+    o.transpile = write_output;
     rc = NIU_EXIT_ERROR;
     if (!niu_read_file(o.input, &src)) {
         niu_message("error", "cannot read '%s': %s", o.input, strerror(errno));

@@ -12,6 +12,8 @@ typedef struct {
     int warn_plain_file;    /* -Wniu-plain-file (on by default) */
     int warn_empty_defer_now; /* -Wniu-empty-defer-now (on by default) */
     int warn_v_no_format;   /* -Wniu-v-no-format (on by default) */
+    int warn_inactive;      /* -Wniu-inactive (on by default; niu transpile only) */
+    int transpile;          /* niu transpile, not niu check */
     int verbose;            /* -v */
 } niu_options;
 
@@ -166,6 +168,15 @@ typedef struct {
     const char *src;
 } niu_locmap;
 
+/* A file name as niu prints it: clang names a header found next to the
+ * file that includes it "./util.h", the spec and the user just "util.h". */
+static const char *niu_display_path(const char *path)
+{
+    while (path[0] == '.' && (path[1] == '/' || path[1] == '\\') && path[2] != '\0')
+        path += 2;
+    return path;
+}
+
 /* "file:line:col" for a location as the user's files name it (#line
  * directives in them are respected), or NULL when it has no file. In the niu
  * file the column is that of the original text, which var and let change. */
@@ -186,7 +197,7 @@ static char *niu_location_string_in(CXSourceLocation loc, const niu_locmap *lm)
         }
     }
     if (*file)
-        r = niu_format("%s:%u:%u", file, line, col);
+        r = niu_format("%s:%u:%u", niu_display_path(file), line, col);
     free(file);
     return r;
 }
@@ -320,8 +331,9 @@ static void niu_visit_include(niu_unit *u, CXCursor c)
         char *name = niu_cxstr(cx.clang_getFileName(file));
         if (!niu_strlist_contains(&u->niu_headers, name)) {
             char *where = niu_location_string(cx.clang_getCursorLocation(c));
-            niu_message_at(where ? where : name, "error",
-                           "'%s' includes <niu.h>, but lowering niu headers is not implemented yet", name);
+            niu_message_at(where ? where : niu_display_path(name), "error",
+                           "'%s' includes <niu.h>, but lowering niu headers is not implemented yet",
+                           niu_display_path(name));
             free(where);
             niu_strlist_push(&u->niu_headers, name);
             u->errors++;
@@ -359,6 +371,59 @@ static enum CXChildVisitResult niu_visit(CXCursor c, CXCursor parent, CXClientDa
     if (!cx.clang_Location_isFromMainFile(cx.clang_getCursorLocation(c)))
         return CXChildVisit_Continue;
     return CXChildVisit_Recurse;
+}
+
+/* The directive that opens a skipped branch, as written ("#ifdef DEBUG"),
+ * without comments, line continuations or the space after the '#'. */
+static char *niu_branch_directive(const char *src, size_t len, size_t b)
+{
+    niu_buf out = {0};
+    size_t i = b, e;
+    if (i < len && src[i] == '#') {
+        niu_buf_putc(&out, '#');
+        i++;
+        while (i < len && (src[i] == ' ' || src[i] == '\t'))
+            i++;
+    }
+    for (e = i; e < len && src[e] != '\n' && src[e] != '\r'; e++)
+        if (src[e] == '/' && e + 1 < len && (src[e + 1] == '/' || src[e + 1] == '*'))
+            break;
+    while (e > i && (src[e - 1] == ' ' || src[e - 1] == '\t' || src[e - 1] == '\\'))
+        e--;
+    niu_buf_append(&out, src + i, e - i);
+    return niu_buf_take(&out);
+}
+
+/* niu code in a branch the preprocessor skipped is left as written (spec.md
+ * "The output is for one configuration"). Marks it inactive for the
+ * analysis, and with warn (niu transpile), gives -Wniu-inactive once per
+ * branch, at its first keyword. */
+static void niu_check_inactive(niu_unit *u, niu_dctx *dc, CXFile main_file, int warn)
+{
+    CXSourceRangeList *list = cx.clang_getSkippedRanges(u->tu, main_file);
+    unsigned i;
+    if (!list)
+        return;
+    for (i = 0; i < list->count; i++) {
+        size_t b, e;
+        niu_marker *m;
+        niu_offset_of(cx.clang_getRangeStart(list->ranges[i]), &b);
+        niu_offset_of(cx.clang_getRangeEnd(list->ranges[i]), &e);
+        b = niu_pp_to_src(&u->pp, b);
+        e = niu_pp_to_src(&u->pp, e);
+        if (b > u->len || e > u->len || b >= e)
+            continue;
+        m = niu_prepass_skip(&u->pp, b, e);
+        if (m && warn) {
+            char *dir = niu_branch_directive(u->src, u->len, b);
+            niu_diag *d = niu_ddiag(dc, "warning", m->off,
+                                    "niu code in an inactive '%s' branch is not lowered [-Wniu-inactive]", dir);
+            niu_dnote(d, m->off, "the output will not compile with this branch enabled; transpile again with that "
+                                 "configuration");
+            free(dir);
+        }
+    }
+    cx.clang_disposeSourceRangeList(list);
 }
 
 /* One parse of the pre-passed text. */
@@ -476,6 +541,7 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
                 size_t b = u->niu_h_ranges[2 * i], e = u->niu_h_ranges[2 * i + 1];
                 niu_ledit_text(&dc, -1, b, e, niu_comment_out(src + b, e - b));
             }
+            niu_check_inactive(u, &dc, main_file, o->warn_inactive && o->transpile);
             niu_defer_analyze(&dc);
             u->errors += niu_report_diagnostics(u->tu, &u->pp, src, main_file, dc.clang_skip, dc.n_clang_skip,
                                                 dc.skip_ranges, dc.n_skip_ranges);

@@ -36,6 +36,7 @@ typedef struct {
     const char *spelling; /* "defer", "_Defer", ... */
     int define;    /* index into niu_prepass.defines, or -1 */
     int matched;   /* found in the AST */
+    int inactive;  /* in a branch the preprocessor skipped: left as written */
     size_t pp_off; /* where the replacement is in niu_prepass.text */
     size_t pp_len; /* its length */
     /* var and let only: */
@@ -54,6 +55,7 @@ typedef struct {
     size_t params_b, params_e;    /* "(a, b)", or empty for an object-like macro */
     size_t body_b, body_e;        /* the replacement list, without trailing space */
     int first_marker, n_markers;  /* its keywords in niu_prepass.markers */
+    int inactive;                 /* in a branch the preprocessor skipped */
 } niu_define;
 
 /* A #define or #undef in the niu part of the file (for constraint 11). */
@@ -61,6 +63,7 @@ typedef struct {
     char *name;
     size_t off; /* the '#' */
     int undef;
+    int inactive; /* in a branch the preprocessor skipped */
 } niu_directive;
 
 typedef struct {
@@ -133,6 +136,7 @@ static niu_marker *niu_prepass_mark(niu_prepass *p, const niu_tok *t, int kw, in
     m->spelling = niu_keywords[kw].word;
     m->define = define;
     m->matched = 0;
+    m->inactive = 0;
     m->pp_off = 0;
     m->pp_len = strlen(niu_keywords[kw].repl);
     m->ctx = NIU_CTX_OTHER;
@@ -421,6 +425,7 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
                 d->name = niu_strndup(src + toks[1].b, toks[1].e - toks[1].b);
                 d->off = t.b;
                 d->undef = niu_tok_is(src, &toks[0], "undef");
+                d->inactive = 0;
             }
             if (nk >= 2 && niu_tok_is(src, &toks[0], "define") && toks[1].kind == NIU_TOK_IDENT) {
                 size_t body = 2, first = p->n_markers;
@@ -449,6 +454,7 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
                     def.body_e = toks[nk - 1].e;
                     def.first_marker = (int)first;
                     def.n_markers = (int)(p->n_markers - first);
+                    def.inactive = 0;
                     if (p->n_defines == p->cap_defines) {
                         p->cap_defines = p->cap_defines ? 2 * p->cap_defines : 8;
                         p->defines = (niu_define *)niu_xrealloc(p->defines, p->cap_defines * sizeof *p->defines);
@@ -462,6 +468,29 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
     free(dt.items);
     free(bs.items);
     niu_prepass_build(p, src, len);
+}
+
+/* Marks everything the pre-pass found in [b, e) of the original text as
+ * inactive: the preprocessor skipped it, so niu leaves it as written
+ * (spec.md "The output is for one configuration"). Returns the first
+ * keyword there, or NULL when the range has none. */
+static niu_marker *niu_prepass_skip(niu_prepass *p, size_t b, size_t e)
+{
+    niu_marker *first = NULL;
+    size_t i;
+    for (i = 0; i < p->n_markers; i++)
+        if (p->markers[i].off >= b && p->markers[i].off < e) {
+            p->markers[i].inactive = 1;
+            if (!first)
+                first = &p->markers[i];
+        }
+    for (i = 0; i < p->n_defines; i++)
+        if (p->defines[i].line_off >= b && p->defines[i].line_off < e)
+            p->defines[i].inactive = 1;
+    for (i = 0; i < p->n_directives; i++)
+        if (p->directives[i].off >= b && p->directives[i].off < e)
+            p->directives[i].inactive = 1;
+    return first;
 }
 
 /* The marker at offset off, or NULL. */

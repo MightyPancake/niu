@@ -1174,7 +1174,7 @@ static void niu_check_macros(niu_dctx *c, niu_defer *d, size_t exit_off)
     size_t i;
     for (i = 0; i < c->pp->n_directives; i++) {
         niu_directive *dir = &c->pp->directives[i];
-        if (dir->off > d->node->b && dir->off < exit_off && niu_strlist_contains(&d->macros, dir->name) &&
+        if (!dir->inactive && dir->off > d->node->b && dir->off < exit_off && niu_strlist_contains(&d->macros, dir->name) &&
             !niu_strlist_contains(&d->macros_reported, dir->name)) {
             niu_diag *g = niu_ddiag(c, "error", dir->off,
                                     "'%s' is redefined while a deferred statement that uses it is still pending",
@@ -1497,7 +1497,7 @@ static niu_define *niu_define_for(niu_dctx *c, niu_node *n, int kind, int *direc
         return NULL;
     for (i = 0; i < c->pp->n_defines; i++) {
         niu_define *def = &c->pp->defines[i];
-        if (strcmp(def->name, x->name) == 0 && c->pp->markers[def->first_marker].kind == kind) {
+        if (!def->inactive && strcmp(def->name, x->name) == 0 && c->pp->markers[def->first_marker].kind == kind) {
             *direct = 1;
             return def;
         }
@@ -1511,6 +1511,8 @@ static niu_define *niu_define_for(niu_dctx *c, niu_node *n, int kind, int *direc
             for (i = 0; i < c->pp->n_defines; i++) {
                 niu_define *def = &c->pp->defines[i];
                 niu_lexer lx;
+                if (def->inactive)
+                    continue;
                 niu_lex_init(&lx, body, strlen(body), 0);
                 for (;;) {
                     niu_tok t = niu_lex_next(&lx);
@@ -2088,7 +2090,7 @@ static void niu_check_unmatched(niu_dctx *c)
     for (i = 0; i < c->pp->n_markers; i++) {
         niu_marker *m = &c->pp->markers[i];
         int in_function = 0;
-        if (m->matched || m->define >= 0 || m->kind == NIU_MARK_VAR || m->kind == NIU_MARK_LET)
+        if (m->matched || m->inactive || m->define >= 0 || m->kind == NIU_MARK_VAR || m->kind == NIU_MARK_LET)
             continue;
         for (j = 0; j < c->functions.count; j++) {
             niu_node *f = c->functions.items[j];
@@ -2129,6 +2131,8 @@ static void niu_rewrite_defines(niu_dctx *c)
         niu_define *def = &c->pp->defines[i];
         niu_marker *first = &c->pp->markers[def->first_marker];
         int k, defers = 0, nows = 0, vars = 0;
+        if (def->inactive)
+            continue;
         for (k = 0; k < def->n_markers; k++) {
             niu_marker *m = &c->pp->markers[def->first_marker + k];
             if (m->kind == NIU_MARK_VAR || m->kind == NIU_MARK_LET) {
@@ -2205,7 +2209,7 @@ static void niu_defer_analyze(niu_dctx *c)
     niu_v_analyze(c);
     niu_rewrite_defines(c);
     for (i = 0; i < c->pp->n_directives; i++)
-        if (niu_starts_with(c->pp->directives[i].name, "__niu"))
+        if (!c->pp->directives[i].inactive && niu_starts_with(c->pp->directives[i].name, "__niu"))
             niu_ddiag(c, "error", c->pp->directives[i].off, "identifiers starting with '__niu' are reserved");
     for (i = 0; i < c->functions.count; i++)
         niu_check_reserved(c, c->functions.items[i]);

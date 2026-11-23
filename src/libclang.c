@@ -31,6 +31,11 @@ typedef struct {
     unsigned end_int_data;
 } CXSourceRange;
 
+typedef struct {
+    unsigned count;
+    CXSourceRange *ranges;
+} CXSourceRangeList;
+
 /* kind is an enum CXCursorKind in Index.h; enums are int-sized here. */
 typedef struct {
     int kind;
@@ -115,6 +120,8 @@ typedef enum CXVisitorResult (*CXFieldVisitor)(CXCursor c, CXClientData client_d
     X(CXSourceLocation, clang_getRangeStart, (CXSourceRange))                                                          \
     X(CXSourceLocation, clang_getRangeEnd, (CXSourceRange))                                                            \
     X(CXFile, clang_getIncludedFile, (CXCursor))                                                                       \
+    X(CXSourceRangeList *, clang_getSkippedRanges, (CXTranslationUnit, CXFile))                                       \
+    X(void, clang_disposeSourceRangeList, (CXSourceRangeList *))                                                       \
     X(CXFile, clang_getFile, (CXTranslationUnit, const char *))                                                        \
     X(CXString, clang_getFileName, (CXFile))                                                                           \
     X(int, clang_File_isEqual, (CXFile, CXFile))                                                                       \

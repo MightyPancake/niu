@@ -505,8 +505,18 @@ expect "-std= is passed to libclang" 1 - "$niu" check -std=c99 -std=not-a-standa
 d=$(fresh_dir err-header)
 printf '#include <niu.h>\nint helper(void);\n' >"$d/util.h"
 printf '#include "util.h"\nint main(void) { return 0; }\n' >"$d/user.c"
-expect "a niu header is reported as not implemented yet" 1 - "$niu" transpile user.c &&
-    stderr_has "  ... message" "util.h:1:1: error:" "includes <niu.h>, but lowering niu headers is not implemented yet"
+expect "a niu header is reported as not implemented yet" 1 \
+    "util.h:1:1: error: 'util.h' includes <niu.h>, but lowering niu headers is not implemented yet" \
+    "$niu" transpile user.c
+# clang names a header found next to its includer "./plain.h"; niu prints "plain.h"
+printf 'int plain_h_var = 1;\nint plain_h_bad = no_such_name;\n' >"$d/plain.h"
+printf '#include "plain.h"\nint main(void) { return 0; }\n' >"$d/user2.c"
+expect "a header's name is printed without './'" 1 - "$niu" check user2.c &&
+    if grep '^plain\.h:2:' "$d/stderr.lf" >/dev/null && ! grep -F './plain.h' "$d/stderr.lf" >/dev/null; then
+        pass "  ... the message starts with 'plain.h:2:'"
+    else
+        fail "  ... the header's name in the message" "$d/stderr.lf"
+    fi
 
 # A .niu.c name without <niu.h>.
 d=$(fresh_dir err-name)
@@ -1051,6 +1061,63 @@ for cc in $compilers; do
         fail "$cc: %v gives warnings with -D__NIU_TOOLING__" "$d/log"
     fi
 done
+
+# ---------------------------------------------------------------------------
+echo
+echo "== inactive branches"
+
+# spec.md "The output is for one configuration": niu code in a branch the
+# preprocessor skipped is left as written, and niu transpile warns once per
+# branch (-Wniu-inactive). Everything the pre-pass finds there is ignored:
+# keywords, #defines with keywords, #undefs (defer constraint 11).
+d=$(fresh_dir inactive)
+cat >"$d/x.c" <<'EOF_X'
+#include <stdlib.h>
+#include <niu.h>
+#define LOG(s) (void)(s)
+void f(char *p) {
+#ifdef DEBUG
+    defer free(p);
+#endif
+    var n = 1;
+    (void)n;
+#if 0 /* off */
+    var m = 2;
+#  undef LOG
+#  define AF(q) defer free(q)
+#  define __niu_x 1
+#else
+    defer LOG(p);
+#endif
+}
+#if 0
+#define BAD(x) var y = x
+#endif
+int main(void) { f(NULL); return 0; }
+EOF_X
+expect "-Wniu-inactive: niu code in inactive branches is reported" 0 \
+    "x.c:6:5: warning: niu code in an inactive '#ifdef DEBUG' branch is not lowered [-Wniu-inactive]
+x.c:6:5: note: the output will not compile with this branch enabled; transpile again with that configuration
+x.c:11:5: warning: niu code in an inactive '#if 0' branch is not lowered [-Wniu-inactive]
+x.c:11:5: note: the output will not compile with this branch enabled; transpile again with that configuration
+x.c:20:16: warning: niu code in an inactive '#if 0' branch is not lowered [-Wniu-inactive]
+x.c:20:16: note: the output will not compile with this branch enabled; transpile again with that configuration" \
+    "$niu" transpile x.c &&
+    if grep -F -x '    defer free(p);' "$d/x.plain.c" >/dev/null && grep -F -x '    var m = 2;' "$d/x.plain.c" >/dev/null &&
+        grep -F -x '#  define AF(q) defer free(q)' "$d/x.plain.c" >/dev/null &&
+        grep -F -x '    /* defer LOG(p); */' "$d/x.plain.c" >/dev/null; then
+        pass "  ... inactive code is left as written, active code is lowered"
+    else
+        fail "  ... the output of inactive branches" "$d/x.plain.c"
+    fi
+expect "-Wno-niu-inactive turns it off" 0 "" "$niu" transpile -Wno-niu-inactive x.c
+expect "niu check does not give -Wniu-inactive" 0 "" "$niu" check x.c
+expect "a branch made active with -D is lowered" 0 - "$niu" transpile -DDEBUG x.c &&
+    if grep -F -x '    /* defer free(p); */' "$d/x.plain.c" >/dev/null; then
+        pass "  ... the defer under -DDEBUG is lowered"
+    else
+        fail "  ... the defer under -DDEBUG is not lowered" "$d/x.plain.c"
+    fi
 
 # ---------------------------------------------------------------------------
 echo

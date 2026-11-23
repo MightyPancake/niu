@@ -1143,7 +1143,7 @@ static void niu_var_analyze(niu_dctx *c)
     size_t i;
     for (i = 0; i < c->pp->n_markers; i++) {
         niu_marker *m = &c->pp->markers[i];
-        if ((m->kind == NIU_MARK_VAR || m->kind == NIU_MARK_LET) && m->define < 0)
+        if ((m->kind == NIU_MARK_VAR || m->kind == NIU_MARK_LET) && m->define < 0 && !m->inactive)
             niu_var_one(c, m);
     }
 }
