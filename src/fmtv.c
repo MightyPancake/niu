@@ -186,15 +186,16 @@ static char *niu_fmt_expand(niu_dctx *c, const char *text, size_t len)
     }
     for (;;) {
         niu_tok r = niu_lex_next(&lx);
-        size_t k;
+        size_t k, n = 0; /* n: params replaced by an argument */
         if (r.kind == NIU_TOK_EOF)
             break;
         niu_buf_putc(&out, ' ');
         if (fnlike && r.kind == NIU_TOK_IDENT)
-            for (k = 0; k < params.count && k < args.count; k++)
-                if (r.e - r.b == strlen(params.items[k]) && memcmp(body + r.b, params.items[k], r.e - r.b) == 0)
-                    break;
-        if (fnlike && r.kind == NIU_TOK_IDENT && k < params.count && k < args.count)
+            n = params.count < args.count ? params.count : args.count;
+        for (k = 0; k < n; k++)
+            if (r.e - r.b == strlen(params.items[k]) && memcmp(body + r.b, params.items[k], r.e - r.b) == 0)
+                break;
+        if (k < n)
             niu_buf_puts(&out, args.items[k]);
         else
             niu_buf_append(&out, body + r.b, r.e - r.b);
