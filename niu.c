@@ -40,6 +40,7 @@
 #include "src/lex.c"
 #include "src/prepass.c"
 #include "src/defer.c"
+#include "src/var.c"
 #include "src/lower.c"
 #include "src/frontend.c"
 #include "src/cli.c"

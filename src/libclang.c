@@ -128,7 +128,25 @@ typedef enum CXChildVisitResult (*CXCursorVisitor)(CXCursor cursor, CXCursor par
     X(int, clang_Cursor_getStorageClass, (CXCursor))                                                                   \
     X(int, clang_getCursorTLSKind, (CXCursor))                                                                         \
     X(unsigned, clang_Cursor_isMacroFunctionLike, (CXCursor))                                                          \
-    X(const char *, clang_getFileContents, (CXTranslationUnit, CXFile, size_t *))
+    X(const char *, clang_getFileContents, (CXTranslationUnit, CXFile, size_t *))                                    \
+    X(CXType, clang_getPointeeType, (CXType))                                                                          \
+    X(CXType, clang_getArrayElementType, (CXType))                                                                     \
+    X(long long, clang_getArraySize, (CXType))                                                                         \
+    X(CXType, clang_getResultType, (CXType))                                                                           \
+    X(int, clang_getNumArgTypes, (CXType))                                                                             \
+    X(CXType, clang_getArgType, (CXType, unsigned))                                                                    \
+    X(unsigned, clang_isFunctionTypeVariadic, (CXType))                                                                \
+    X(int, clang_getFunctionTypeCallingConv, (CXType))                                                                 \
+    X(CXCursor, clang_getTypeDeclaration, (CXType))                                                                    \
+    X(CXType, clang_getTypedefDeclUnderlyingType, (CXCursor))                                                          \
+    X(CXType, clang_Type_getNamedType, (CXType))                                                                       \
+    X(CXType, clang_Type_getModifiedType, (CXType))                                                                    \
+    X(CXType, clang_Type_getValueType, (CXType))                                                                       \
+    X(unsigned, clang_isConstQualifiedType, (CXType))                                                                  \
+    X(unsigned, clang_isVolatileQualifiedType, (CXType))                                                               \
+    X(unsigned, clang_isRestrictQualifiedType, (CXType))                                                               \
+    X(CXCursor, clang_getCanonicalCursor, (CXCursor))                                                                  \
+    X(CXCursor, clang_getCursorSemanticParent, (CXCursor))
 
 /* Functions niu does not call (yet), but whose presence shows that the
  * library is at least LLVM 17. LLVM 18 added no C API functions, so the

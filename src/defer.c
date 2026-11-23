@@ -205,6 +205,12 @@ typedef struct {
     int internal_error;
     size_t *clang_skip; /* offsets where libclang's errors are left out: niu reports them */
     size_t n_clang_skip;
+    size_t *skip_ranges; /* ranges (begin, end, ...) where libclang's diagnostics are left out */
+    size_t n_skip_ranges;
+    CXType *var_auto;    /* var.c: the __auto_type clang deduced for a var or let ... */
+    CXType *var_written; /* ... and the type niu wrote for it, ... */
+    CXCursor *var_decls; /* ... for this declaration */
+    size_t n_var_types;
     size_t n_dollar; /* declarations or macros named '$' (reserved) */
 
     niu_strlist typedef_names; /* every file-scope typedef ... */
@@ -344,14 +350,15 @@ static void niu_node_locate(niu_dctx *c, niu_node *n)
     CXFile f = NULL;
     unsigned line, col, off = 0;
     cx.clang_getExpansionLocation(cx.clang_getRangeStart(r), &f, &line, &col, &off);
-    n->b = off;
+    n->b = niu_pp_to_src(c->pp, off);
     cx.clang_getExpansionLocation(cx.clang_getRangeEnd(r), &f, &line, &col, &off);
+    off = (unsigned)niu_pp_to_src(c->pp, off);
     n->e = off < n->b ? n->b : off;
     f = NULL;
     off = 0;
     cx.clang_getSpellingLocation(cx.clang_getRangeStart(r), &f, &line, &col, &off);
-    n->sb = off;
     n->sb_main = niu_in_main(c, f);
+    n->sb = n->sb_main ? niu_pp_to_src(c->pp, off) : off;
     /* Code from a macro use cannot be edited. (libclang before 19 gives the
      * use, not the #define, as the spelling of a macro's tokens, so the use's
      * extent is what tells.) */
@@ -368,7 +375,17 @@ static size_t niu_cursor_off(niu_dctx *c, CXCursor cur)
     CXFile f = NULL;
     unsigned line, col, off = 0;
     cx.clang_getExpansionLocation(cx.clang_getCursorLocation(cur), &f, &line, &col, &off);
-    return niu_in_main(c, f) ? off : (size_t)-1;
+    return niu_in_main(c, f) ? niu_pp_to_src(c->pp, off) : (size_t)-1;
+}
+
+/* Offset of where a cursor's location is spelled, or (size_t)-1 outside the
+ * file (for a name written in a macro argument). */
+static size_t niu_cursor_spelling_off(niu_dctx *c, CXCursor cur)
+{
+    CXFile f = NULL;
+    unsigned line, col, off = 0;
+    cx.clang_getSpellingLocation(cx.clang_getCursorLocation(cur), &f, &line, &col, &off);
+    return niu_in_main(c, f) ? niu_pp_to_src(c->pp, off) : (size_t)-1;
 }
 
 /* The macro use whose expansion covers offset off, or NULL. Top-level macro
@@ -787,6 +804,8 @@ static enum CXChildVisitResult niu_macro_visit(CXCursor cur, CXCursor parent, CX
         if (niu_in_main(c, f)) {
             niu_expansion *x;
             cx.clang_getExpansionLocation(cx.clang_getRangeEnd(r), &f, &line, &col, &e);
+            b = (unsigned)niu_pp_to_src(c->pp, b);
+            e = (unsigned)niu_pp_to_src(c->pp, e);
             if (c->n_exps == c->cap_exps) {
                 c->cap_exps = c->cap_exps ? 2 * c->cap_exps : 32;
                 c->exps = (niu_expansion *)niu_xrealloc(c->exps, c->cap_exps * sizeof *c->exps);
@@ -2068,7 +2087,7 @@ static void niu_check_unmatched(niu_dctx *c)
     for (i = 0; i < c->pp->n_markers; i++) {
         niu_marker *m = &c->pp->markers[i];
         int in_function = 0;
-        if (m->matched || m->define >= 0)
+        if (m->matched || m->define >= 0 || m->kind == NIU_MARK_VAR || m->kind == NIU_MARK_LET)
             continue;
         for (j = 0; j < c->functions.count; j++) {
             niu_node *f = c->functions.items[j];
@@ -2108,13 +2127,21 @@ static void niu_rewrite_defines(niu_dctx *c)
     for (i = 0; i < c->pp->n_defines; i++) {
         niu_define *def = &c->pp->defines[i];
         niu_marker *first = &c->pp->markers[def->first_marker];
-        int k, defers = 0, nows = 0;
+        int k, defers = 0, nows = 0, vars = 0;
         for (k = 0; k < def->n_markers; k++) {
-            if (c->pp->markers[def->first_marker + k].kind == NIU_MARK_DEFER)
+            niu_marker *m = &c->pp->markers[def->first_marker + k];
+            if (m->kind == NIU_MARK_VAR || m->kind == NIU_MARK_LET) {
+                /* var and let constraint 7 */
+                niu_ddiag(c, "error", m->off, "'%s' cannot be used in a macro", m->spelling);
+                vars++;
+            } else if (m->kind == NIU_MARK_DEFER) {
                 defers++;
-            else
+            } else {
                 nows++;
+            }
         }
+        if (vars)
+            continue;
         if (nows) {
             for (k = 0; k < def->n_markers; k++) {
                 niu_marker *m = &c->pp->markers[def->first_marker + k];
@@ -2151,7 +2178,9 @@ static void niu_rewrite_defines(niu_dctx *c)
     }
 }
 
-/* Runs the whole defer analysis. */
+static void niu_var_analyze(niu_dctx *c);
+
+/* Runs the whole analysis: defers, and var and let (var.c). */
 static void niu_defer_analyze(niu_dctx *c)
 {
     niu_mvisit mv;
@@ -2170,6 +2199,7 @@ static void niu_defer_analyze(niu_dctx *c)
     niu_mark_nodes(c);
     niu_check_unmatched(c);
     niu_make_defers(c);
+    niu_var_analyze(c);
     niu_rewrite_defines(c);
     for (i = 0; i < c->pp->n_directives; i++)
         if (niu_starts_with(c->pp->directives[i].name, "__niu"))
@@ -2197,6 +2227,10 @@ static void niu_dctx_free(niu_dctx *c)
     free(c->exps);
     niu_strlist_free(&c->macro_names);
     free(c->clang_skip);
+    free(c->skip_ranges);
+    free(c->var_auto);
+    free(c->var_written);
+    free(c->var_decls);
     free(c->macro_defs);
     for (i = 0; i < c->n_defers; i++) {
         size_t k;

@@ -31,6 +31,14 @@ enum { $ };
 #define _Defer if (0)
 #define defer_now ((void)0)
 #define _Defer_now ((void)0)
+/* var and let need type inference, which C99 lacks: __auto_type is the GNU
+ * extension Clang and GCC tools know. niu itself writes the type out. */
+#define var __auto_type
+#define let __auto_type const
+#ifdef __clang__
+/* -pedantic: __auto_type is a GNU extension (GCC does not warn) */
+#pragma clang diagnostic ignored "-Wgnu-auto-type"
+#endif
 #else
 #error "this file must be compiled with niu"
 #endif

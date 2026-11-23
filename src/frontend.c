@@ -157,22 +157,45 @@ static const char *niu_severity_name(int sev)
     }
 }
 
+/* The niu file, for mapping libclang's locations in it back to the
+ * original text (see niu_pp_to_src). */
+typedef struct {
+    CXFile main_file;
+    const niu_prepass *pp;
+    const char *src;
+} niu_locmap;
+
 /* "file:line:col" for a location as the user's files name it (#line
- * directives in them are respected), or NULL when it has no file. */
-static char *niu_location_string(CXSourceLocation loc)
+ * directives in them are respected), or NULL when it has no file. In the niu
+ * file the column is that of the original text, which var and let change. */
+static char *niu_location_string_in(CXSourceLocation loc, const niu_locmap *lm)
 {
     CXString fname;
     unsigned line = 0, col = 0;
     char *file, *r = NULL;
     cx.clang_getPresumedLocation(loc, &fname, &line, &col);
     file = niu_cxstr(fname);
+    if (lm && lm->main_file && lm->pp->n_markers) {
+        CXFile f = NULL;
+        unsigned l2, c2, off = 0;
+        cx.clang_getExpansionLocation(loc, &f, &l2, &c2, &off);
+        if (f && cx.clang_File_isEqual(f, lm->main_file)) {
+            size_t o = niu_pp_to_src(lm->pp, off);
+            col = (unsigned)(o - niu_line_start(lm->src, o) + 1);
+        }
+    }
     if (*file)
         r = niu_format("%s:%u:%u", file, line, col);
     free(file);
     return r;
 }
 
-static void niu_print_diagnostic(CXDiagnostic d)
+static char *niu_location_string(CXSourceLocation loc)
+{
+    return niu_location_string_in(loc, NULL);
+}
+
+static void niu_print_diagnostic(CXDiagnostic d, const niu_locmap *lm)
 {
     int sev = cx.clang_getDiagnosticSeverity(d);
     char *where, *msg, *opt;
@@ -181,7 +204,7 @@ static void niu_print_diagnostic(CXDiagnostic d)
     unsigned i, n;
     if (sev == CXDiagnostic_Ignored)
         return;
-    where = niu_location_string(cx.clang_getDiagnosticLocation(d));
+    where = niu_location_string_in(cx.clang_getDiagnosticLocation(d), lm);
     msg = niu_cxstr(cx.clang_getDiagnosticSpelling(d));
     opt = niu_cxstr(cx.clang_getDiagnosticOption(d, &disable));
     cx.clang_disposeString(disable);
@@ -197,38 +220,62 @@ static void niu_print_diagnostic(CXDiagnostic d)
     n = children ? cx.clang_getNumDiagnosticsInSet(children) : 0;
     for (i = 0; i < n; i++) {
         CXDiagnostic c = cx.clang_getDiagnosticInSet(children, i);
-        niu_print_diagnostic(c);
+        niu_print_diagnostic(c, lm);
         cx.clang_disposeDiagnostic(c);
     }
 }
 
 /* Prints libclang's diagnostics; returns the number of errors. A
- * diagnostic on a niu keyword is left out: it is about the C the pre-pass
- * put there, and niu reports what is wrong with the keyword itself. So is
- * one at the offsets in skip, where niu reports a reserved '$'. */
-static int niu_report_diagnostics(CXTranslationUnit tu, niu_prepass *pp, CXFile main_file, const size_t *skip,
-                                  size_t n_skip)
+ * diagnostic on a defer keyword is left out: it is about the C the pre-pass
+ * put there, and niu reports what is wrong with the keyword itself. So is a
+ * warning on a var or let keyword. So is one at the offsets in skip, where
+ * niu reports a reserved '$', and one inside the ranges in skip_ranges
+ * (begin, end, ...), the var and let declarations niu reports errors for. */
+static int niu_report_diagnostics(CXTranslationUnit tu, niu_prepass *pp, const char *src, CXFile main_file,
+                                  const size_t *skip, size_t n_skip, const size_t *skip_ranges, size_t n_ranges)
 {
     unsigned i, n = cx.clang_getNumDiagnostics(tu);
     int errors = 0;
+    niu_locmap lm;
+    lm.main_file = main_file;
+    lm.pp = pp;
+    lm.src = src;
     for (i = 0; i < n; i++) {
         CXDiagnostic d = cx.clang_getDiagnostic(tu, i);
         int sev = cx.clang_getDiagnosticSeverity(d);
+        CXSourceLocation loc = cx.clang_getDiagnosticLocation(d);
         CXFile f = NULL;
         unsigned line, col, off = 0;
-        cx.clang_getExpansionLocation(cx.clang_getDiagnosticLocation(d), &f, &line, &col, &off);
+        cx.clang_getExpansionLocation(loc, &f, &line, &col, &off);
         if (f && main_file && cx.clang_File_isEqual(f, main_file)) {
-            size_t k;
-            for (k = 0; k < n_skip && skip[k] != off; k++)
+            size_t k, o = niu_pp_to_src(pp, off), so = (size_t)-1;
+            niu_marker *m = pp->n_markers ? niu_marker_covering(pp, o) : NULL;
+            int drop = 0;
+            CXFile sf = NULL;
+            unsigned soff = 0;
+            cx.clang_getSpellingLocation(loc, &sf, &line, &col, &soff);
+            if (sf && cx.clang_File_isEqual(sf, main_file))
+                so = niu_pp_to_src(pp, soff);
+            for (k = 0; k < n_skip && skip[k] != o; k++)
                 ;
-            if (k < n_skip || (pp->n_markers && niu_marker_covering(pp, off))) {
+            if (k < n_skip)
+                drop = 1;
+            if (m && m->kind != NIU_MARK_VAR && m->kind != NIU_MARK_LET)
+                drop = 1;
+            if (m && sev == CXDiagnostic_Warning)
+                drop = 1;
+            for (k = 0; k < 2 * n_ranges; k += 2)
+                if ((o >= skip_ranges[k] && o < skip_ranges[k + 1]) ||
+                    (so != (size_t)-1 && so >= skip_ranges[k] && so < skip_ranges[k + 1]))
+                    drop = 1;
+            if (drop) {
                 cx.clang_disposeDiagnostic(d);
                 continue;
             }
         }
         if (sev == CXDiagnostic_Error || sev == CXDiagnostic_Fatal)
             errors++;
-        niu_print_diagnostic(d);
+        niu_print_diagnostic(d, &lm);
         cx.clang_disposeDiagnostic(d);
     }
     return errors;
@@ -266,6 +313,8 @@ static void niu_visit_include(niu_unit *u, CXCursor c)
     r = cx.clang_getCursorExtent(c);
     file = niu_offset_of(cx.clang_getRangeStart(r), &begin);
     niu_offset_of(cx.clang_getRangeEnd(r), &end);
+    begin = niu_pp_to_src(&u->pp, begin);
+    end = niu_pp_to_src(&u->pp, end);
     if (!cx.clang_Location_isFromMainFile(cx.clang_getCursorLocation(c))) {
         char *name = niu_cxstr(cx.clang_getFileName(file));
         if (!niu_strlist_contains(&u->niu_headers, name)) {
@@ -319,7 +368,7 @@ static CXTranslationUnit niu_parse(const niu_options *o, CXIndex index, niu_strl
     unsigned flags = CXTranslationUnit_DetailedPreprocessingRecord | CXTranslationUnit_KeepGoing;
     unsaved[0].Filename = o->input;
     unsaved[0].Contents = u->pp.text;
-    unsaved[0].Length = (unsigned long)u->len;
+    unsaved[0].Length = (unsigned long)u->pp.len;
     unsaved[1].Filename = u->niu_h_path;
     unsaved[1].Contents = niu_h_text;
     unsaved[1].Length = (unsigned long)(sizeof niu_h_text - 1);
@@ -360,6 +409,9 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
         niu_strlist_push_owned(&args, niu_format("--target=%s", target));
     for (i = 0; i < o->user_args.count; i++)
         niu_strlist_push(&args, o->user_args.items[i]);
+    /* var and let parse as __auto_type, a GNU extension that -pedantic warns
+     * about; after the user's flags, so that it wins over -pedantic-errors */
+    niu_strlist_push(&args, "-Wno-gnu-auto-type");
 #ifdef __APPLE__
     niu_add_sysroot(&args);
 #endif
@@ -419,11 +471,12 @@ static int niu_process(const niu_options *o, const char *src, size_t len, niu_un
                 niu_ledit_text(&dc, -1, b, e, niu_comment_out(src + b, e - b));
             }
             niu_defer_analyze(&dc);
-            u->errors += niu_report_diagnostics(u->tu, &u->pp, main_file, dc.clang_skip, dc.n_clang_skip);
+            u->errors += niu_report_diagnostics(u->tu, &u->pp, src, main_file, dc.clang_skip, dc.n_clang_skip,
+                                                dc.skip_ranges, dc.n_skip_ranges);
             niu_print_ddiags(&dc);
             u->errors += dc.errors;
         } else {
-            u->errors += niu_report_diagnostics(u->tu, &u->pp, main_file, NULL, 0);
+            u->errors += niu_report_diagnostics(u->tu, &u->pp, src, main_file, NULL, 0, NULL, 0);
         }
         if (!u->is_niu_file && niu_has_niu_name(o->input) && o->warn_file_name)
             niu_message_at(o->input, "warning",

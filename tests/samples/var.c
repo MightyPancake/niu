@@ -1,0 +1,171 @@
+/* var.c - var and let (spec.md "var and let"). Portable C99: it must
+ * compile with gcc, clang, tcc and cl, and come out the same on every
+ * target, so it avoids types whose underlying type differs between them. */
+#include <stdio.h>
+#include <string.h>
+
+/* a plain struct, before <niu.h>: its member names are not keywords */
+struct opts {
+    int var;
+    int let;
+};
+
+#include <niu.h>
+
+typedef struct S {
+    int a;
+} S;
+struct T {
+    int t;
+};
+typedef struct T other_t;
+typedef unsigned int count_t;
+
+static int failures;
+static int calls;
+
+static void check(int ok, const char *what)
+{
+    if (!ok) {
+        printf("FAIL %s\n", what);
+        failures++;
+    }
+}
+
+static void handler(int x)
+{
+    calls += x;
+}
+
+static S get_s(void)
+{
+    S s;
+    s.a = 7;
+    return s;
+}
+
+static struct T get_t(void)
+{
+    struct T t;
+    t.t = 8;
+    return t;
+}
+
+static count_t get_count(void)
+{
+    return 9u;
+}
+
+#define ID(x) x
+
+/* file scope, and static */
+static var file_scope = 40;
+
+static int typedefs(const char *s, int pick)
+{
+    var n = strlen(s);         /* size_t */
+    size_t a = 1, b = 2;
+    var sum = a + b;           /* size_t: both operands are */
+    var sel = pick ? a : b;    /* size_t */
+    let k = n;                 /* const size_t */
+    var m = n + sum;           /* size_t, through the var n */
+    check(sizeof sum == sizeof(size_t) && sizeof sel == sizeof(size_t), "typedef kept");
+    return (int)(n + sum + sel + k + m);
+}
+
+static int declarators(void)
+{
+    static int grid[8][8];
+    int x = 5;
+    var cb = handler;          /* void (*cb)(int) */
+    var row = &grid[0];        /* int (*row)[8] */
+    let lcb = handler;         /* void (*const lcb)(int) */
+    let lrow = &grid[1];       /* int (*const lrow)[8] */
+    let p = &x;                /* int *const p */
+    var e = grid[2];           /* int *: the array becomes a pointer */
+    var str = "abc";           /* char * */
+    const int ci = 3;
+    var plain = ci;            /* int: the value's const is dropped */
+    var pci = &ci;             /* const int *: the pointee's is kept */
+    var c = 'a';               /* int */
+    var lt = x < 9;            /* int */
+    cb(1);
+    lcb(2);
+    (*lrow)[3] = 4;
+    e[0] = 1;
+    *p = 6;
+    row++;
+    check(row == lrow && grid[1][3] == 4 && grid[2][0] == 1 && x == 6, "declarators");
+    check(*pci + plain == 6 && sizeof c == sizeof(int) && lt == 1 && str[2] == 'c', "values");
+    return calls;
+}
+
+static int hidden_names(void)
+{
+    var a = get_s();           /* S */
+    int sum = a.a;
+    {
+        int S = 0;             /* hides the typedef S: niu writes struct S */
+        var b = get_s();
+        sum += b.a + S;
+    }
+    {
+        struct T {
+            double d;
+        };                     /* hides struct T: niu writes other_t */
+        var t = get_t();
+        sum += t.t;
+    }
+    {
+        int count_t = 1;       /* hides count_t: niu writes unsigned int */
+        var u = get_count();
+        sum += (int)u + count_t;
+    }
+    return sum;
+}
+
+static int with_defers(int bad)
+{
+    int result = 0;
+    for (var i = 0; i < 3; i++) {
+        defer {
+            var twice = i * 2;
+            let r = &result;
+            *r += twice;
+        }
+        if (bad && i == 1)
+            break;
+    }
+    return result;
+}
+
+static int members(void)
+{
+    struct opts o;
+    struct opts *p = &o;
+    struct opts z = {0};
+    o.var = 1;
+    p->let = 2;
+    z.var = o.var + p->let;
+    return z.var;
+}
+
+static int in_macro(void)
+{
+    ID(var v = 11;)
+    return v;
+}
+
+int main(void)
+{
+    check(typedefs("abcd", 1) == 4 + 3 + 1 + 4 + 7, "typedefs");
+    check(declarators() == 3, "declarators: calls");
+    check(hidden_names() == 7 + 7 + 8 + 9 + 1, "hidden names");
+    check(with_defers(0) == 0 + 2 + 4 && with_defers(1) == 0 + 2, "defers");
+    check(members() == 3, "member names");
+    check(in_macro() == 11 && file_scope == 40, "macro argument, file scope");
+    if (failures)
+        return 1;
+    printf("ok\n");
+    return 0;
+}

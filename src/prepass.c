@@ -1,19 +1,33 @@
 /* prepass.c - the token pre-pass. niu keywords are not C, so before
  * libclang parses a niu file, each keyword after `#include <niu.h>` is
- * replaced by C of exactly the same length:
+ * replaced by C:
  *
  *   defer       ->  if($)          _Defer      ->  if ($)
  *   defer_now   ->  ((void)$)      _Defer_now  ->  ( (void)$)
+ *   var         ->  __auto_type    let         ->  __auto_type const
  *
  * `$` is a constant niu.h declares (enum { $ }; only while niu parses). The
  * deferred statement then parses as the body of an if that never runs:
  * clang checks it like any other code, and niu finds it in the AST as an if
- * whose condition is niu's `$`, also when it comes from a macro. Because the
- * lengths are equal, every offset, line and column libclang reports is also
- * right for the original text, which is the text niu edits. Part of niu.c;
- * not compiled on its own. */
+ * whose condition is niu's `$`, also when it comes from a macro. The defer
+ * replacements have the same length as the keyword. var and let cannot: so
+ * the pre-pass keeps an offset map (niu_pp_to_src), and every offset
+ * libclang reports in the niu file goes through it before niu uses it on
+ * the original text, which is the text niu edits. Lines never change, only
+ * the columns after a var or let on the same line. Part of niu.c; not
+ * compiled on its own. */
 
-enum { NIU_MARK_DEFER, NIU_MARK_DEFER_NOW };
+enum { NIU_MARK_DEFER, NIU_MARK_DEFER_NOW, NIU_MARK_VAR, NIU_MARK_LET };
+
+/* Where a var or let is (spec.md "var and let", constraint 8). */
+enum {
+    NIU_CTX_FILE,     /* file scope */
+    NIU_CTX_BLOCK,    /* directly in a block { } */
+    NIU_CTX_FOR_INIT, /* the first clause of a for ( */
+    NIU_CTX_PAREN,    /* inside other parentheses */
+    NIU_CTX_MEMBER,   /* in the braces of a struct, union or enum */
+    NIU_CTX_OTHER     /* in [ ] or an initializer's braces */
+};
 
 typedef struct {
     int kind;      /* NIU_MARK_* */
@@ -22,6 +36,14 @@ typedef struct {
     const char *spelling; /* "defer", "_Defer", ... */
     int define;    /* index into niu_prepass.defines, or -1 */
     int matched;   /* found in the AST */
+    size_t pp_off; /* where the replacement is in niu_prepass.text */
+    size_t pp_len; /* its length */
+    /* var and let only: */
+    int ctx;          /* NIU_CTX_* */
+    size_t decl_b;    /* first token after the last ';', '{', '}' or ':' (or the for's '(') */
+    size_t prev_off;  /* the token before the keyword, or (size_t)-1 */
+    size_t open_off;  /* the innermost open bracket, or (size_t)-1 */
+    size_t open_prev; /* the token before that bracket, or (size_t)-1 */
 } niu_marker;
 
 /* A #define whose body contains a niu keyword. */
@@ -43,7 +65,8 @@ typedef struct {
 
 typedef struct {
     size_t niu_h_off;  /* offset of the '#' of `#include <niu.h>`, or (size_t)-1 */
-    char *text;        /* the text for libclang (a copy of the source) */
+    char *text;        /* the text for libclang: the source with the keywords replaced */
+    size_t len;        /* its length */
     niu_marker *markers;
     size_t n_markers, cap_markers;
     niu_define *defines;
@@ -61,6 +84,8 @@ static const struct {
     {"_Defer", "if ($)", NIU_MARK_DEFER},
     {"defer_now", "((void)$)", NIU_MARK_DEFER_NOW},
     {"_Defer_now", "( (void)$)", NIU_MARK_DEFER_NOW},
+    {"var", "__auto_type", NIU_MARK_VAR},
+    {"let", "__auto_type const", NIU_MARK_LET},
 };
 
 #define NIU_N_KEYWORDS (sizeof niu_keywords / sizeof niu_keywords[0])
@@ -94,7 +119,7 @@ static int niu_is_member_op(const char *s, const niu_tok *prev)
     return dashes % 2 == 1;
 }
 
-static void niu_prepass_mark(niu_prepass *p, const niu_tok *t, int kw, int define)
+static niu_marker *niu_prepass_mark(niu_prepass *p, const niu_tok *t, int kw, int define)
 {
     niu_marker *m;
     if (p->n_markers == p->cap_markers) {
@@ -108,7 +133,162 @@ static void niu_prepass_mark(niu_prepass *p, const niu_tok *t, int kw, int defin
     m->spelling = niu_keywords[kw].word;
     m->define = define;
     m->matched = 0;
-    memcpy(p->text + t->b, niu_keywords[kw].repl, m->len);
+    m->pp_off = 0;
+    m->pp_len = strlen(niu_keywords[kw].repl);
+    m->ctx = NIU_CTX_OTHER;
+    m->decl_b = t->b;
+    m->prev_off = m->open_off = m->open_prev = (size_t)-1;
+    return m;
+}
+
+/* Builds p->text from src: the source with every marker's replacement. */
+static void niu_prepass_build(niu_prepass *p, const char *src, size_t len)
+{
+    niu_buf b = {0};
+    size_t i, pos = 0;
+    for (i = 0; i < p->n_markers; i++) {
+        niu_marker *m = &p->markers[i];
+        size_t k;
+        niu_buf_append(&b, src + pos, m->off - pos);
+        m->pp_off = b.len;
+        for (k = 0; k < NIU_N_KEYWORDS; k++)
+            if (strcmp(niu_keywords[k].word, m->spelling) == 0)
+                niu_buf_puts(&b, niu_keywords[k].repl);
+        pos = m->off + m->len;
+    }
+    niu_buf_append(&b, src + pos, len - pos);
+    p->len = b.len;
+    p->text = niu_buf_take(&b);
+}
+
+/* The offset in the original text of offset off in p->text. An offset
+ * inside a replacement maps to the start of its keyword. */
+static size_t niu_pp_to_src(const niu_prepass *p, size_t off)
+{
+    size_t lo = 0, hi = p->n_markers;
+    const niu_marker *m;
+    if (!p->n_markers)
+        return off;
+    /* the last marker whose replacement starts at or before off */
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (p->markers[mid].pp_off <= off)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo == 0)
+        return off;
+    m = &p->markers[lo - 1];
+    if (off < m->pp_off + m->pp_len)
+        return off == m->pp_off || m->pp_len == m->len ? m->off + (off - m->pp_off) : m->off;
+    return off - (m->pp_off + m->pp_len) + m->off + m->len;
+}
+
+/* The bracket context the pre-pass tracks for var and let. */
+typedef struct {
+    char kind;       /* '(', '[' or '{' */
+    int ctx;         /* NIU_CTX_* for code directly inside */
+    size_t off;      /* the bracket */
+    size_t prev;     /* the token before it, or (size_t)-1 */
+    int for_semis;   /* a for's '(': the ';' seen so far */
+} niu_bracket;
+
+typedef struct {
+    niu_bracket *items;
+    size_t count, cap;
+    size_t decl_b;     /* see niu_marker.decl_b */
+    int have_decl_b;
+    int tag_pending;   /* after struct/union/enum: a '{' opens its members */
+    size_t tag_depth;
+    niu_tok prev;      /* the previous token */
+    int have_prev;
+} niu_brackets;
+
+static int niu_brackets_ctx(const niu_brackets *bs)
+{
+    return bs->count ? bs->items[bs->count - 1].ctx : NIU_CTX_FILE;
+}
+
+/* Follows one token outside directives. */
+static void niu_brackets_step(niu_brackets *bs, const char *s, const niu_tok *t)
+{
+    size_t depth = bs->count;
+    int punct = t->kind == NIU_TOK_PUNCT;
+    char ch = punct ? s[t->b] : 0;
+    const niu_tok *pv = bs->have_prev ? &bs->prev : NULL;
+    if (bs->tag_pending && depth == bs->tag_depth && !(t->kind == NIU_TOK_IDENT || ch == '(' || ch == '[' || ch == '{'))
+        bs->tag_pending = 0;
+    if (punct && (ch == '(' || ch == '[' || ch == '{')) {
+        niu_bracket br;
+        int top = niu_brackets_ctx(bs);
+        br.kind = ch;
+        br.off = t->b;
+        br.prev = pv ? pv->b : (size_t)-1;
+        br.for_semis = 0;
+        if (ch == '(')
+            br.ctx = pv && niu_tok_is(s, pv, "for") ? NIU_CTX_FOR_INIT : NIU_CTX_PAREN;
+        else if (ch == '[')
+            br.ctx = NIU_CTX_OTHER;
+        else if (bs->tag_pending && depth == bs->tag_depth)
+            br.ctx = NIU_CTX_MEMBER;
+        else if (pv && (niu_tok_is(s, pv, "=") || (top == NIU_CTX_OTHER && (niu_tok_is(s, pv, ",") || niu_tok_is(s, pv, "{")))))
+            br.ctx = NIU_CTX_OTHER;
+        else
+            br.ctx = NIU_CTX_BLOCK;
+        if (ch == '{')
+            bs->tag_pending = 0;
+        if (bs->count == bs->cap) {
+            bs->cap = bs->cap ? 2 * bs->cap : 16;
+            bs->items = (niu_bracket *)niu_xrealloc(bs->items, bs->cap * sizeof *bs->items);
+        }
+        bs->items[bs->count++] = br;
+        if (ch == '{' || br.ctx == NIU_CTX_FOR_INIT)
+            bs->have_decl_b = 0;
+    } else if (punct && (ch == ')' || ch == ']' || ch == '}')) {
+        if (bs->count)
+            bs->count--;
+        if (ch == '}')
+            bs->have_decl_b = 0;
+    } else if (punct && (ch == ';' || ch == ':')) {
+        if (ch == ';' && bs->count && bs->items[bs->count - 1].ctx == NIU_CTX_FOR_INIT) {
+            bs->items[bs->count - 1].for_semis++;
+            bs->items[bs->count - 1].ctx = NIU_CTX_PAREN;
+        }
+        bs->have_decl_b = 0;
+    } else {
+        if (!bs->have_decl_b) {
+            bs->decl_b = t->b;
+            bs->have_decl_b = 1;
+        }
+        if (t->kind == NIU_TOK_IDENT &&
+            (niu_tok_is(s, t, "struct") || niu_tok_is(s, t, "union") || niu_tok_is(s, t, "enum"))) {
+            bs->tag_pending = 1;
+            bs->tag_depth = depth;
+        }
+    }
+    if (punct && (ch == '(' || ch == '[') && !bs->have_decl_b) {
+        /* `(var)x`: the declaration would start here */
+        bs->decl_b = t->b;
+        bs->have_decl_b = bs->items[bs->count - 1].ctx != NIU_CTX_FOR_INIT;
+        if (!bs->have_decl_b)
+            bs->decl_b = t->e;
+    }
+    bs->prev = *t;
+    bs->have_prev = 1;
+}
+
+/* Records where a var or let marker is. Called before the keyword's token
+ * is passed to niu_brackets_step. */
+static void niu_brackets_note(const niu_brackets *bs, niu_marker *m)
+{
+    m->ctx = niu_brackets_ctx(bs);
+    m->decl_b = bs->have_decl_b ? bs->decl_b : m->off;
+    m->prev_off = bs->have_prev ? bs->prev.b : (size_t)-1;
+    if (bs->count) {
+        m->open_off = bs->items[bs->count - 1].off;
+        m->open_prev = bs->items[bs->count - 1].prev;
+    }
 }
 
 /* The tokens of a directive line after its '#', up to the end of the line. */
@@ -192,14 +372,15 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
     niu_lexer lx;
     niu_toks dt = {0};
     niu_tok prev = {0};
+    niu_brackets bs;
     int have_prev = 0;
     memset(p, 0, sizeof *p);
+    memset(&bs, 0, sizeof bs);
     p->niu_h_off = niu_h_off;
-    p->text = (char *)niu_xmalloc(len + 1);
-    memcpy(p->text, src, len);
-    p->text[len] = '\0';
-    if (niu_h_off == (size_t)-1)
+    if (niu_h_off == (size_t)-1) {
+        niu_prepass_build(p, src, len);
         return;
+    }
     niu_lex_init(&lx, src, len, niu_h_off);
     for (;;) {
         niu_tok t = niu_lex_next(&lx);
@@ -208,13 +389,19 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
             break;
         if (!(t.bol && niu_tok_is(src, &t, "#"))) {
             kw = niu_keyword_index(src, &t);
-            if (kw >= 0 && !niu_is_member_op(src, have_prev ? &prev : NULL))
-                niu_prepass_mark(p, &t, kw, -1);
+            if (kw >= 0 && !niu_is_member_op(src, have_prev ? &prev : NULL)) {
+                niu_marker *m = niu_prepass_mark(p, &t, kw, -1);
+                if (m->kind == NIU_MARK_VAR || m->kind == NIU_MARK_LET)
+                    niu_brackets_note(&bs, m);
+            }
+            niu_brackets_step(&bs, src, &t);
             prev = t;
             have_prev = 1;
             continue;
         }
         have_prev = 0;
+        bs.have_prev = 0;
+        bs.have_decl_b = 0;
         if (t.bol && niu_tok_is(src, &t, "#")) {
             /* A directive. Keywords are replaced only in #define bodies. */
             niu_tok *toks;
@@ -273,6 +460,8 @@ static void niu_prepass_run(niu_prepass *p, const char *src, size_t len, size_t 
         }
     }
     free(dt.items);
+    free(bs.items);
+    niu_prepass_build(p, src, len);
 }
 
 /* The marker at offset off, or NULL. */

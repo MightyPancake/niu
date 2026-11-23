@@ -711,5 +711,210 @@ defer_case "no defer_now in a macro" 1 \
 
 # ---------------------------------------------------------------------------
 echo
+echo "== var and let errors"
+
+d=$(fresh_dir var-errors)
+
+# var_out <test name> <expected line>...: transpiles x.c and checks that the
+# output has each line
+var_out() {
+    vo_name=$1
+    shift
+    if ! (cd "$d" && "$niu" transpile x.c) >"$d/log" 2>&1 || [ -s "$d/log" ]; then
+        fail "$vo_name: transpile failed" "$d/log"
+        return 1
+    fi
+    for l in "$@"; do
+        if ! grep -F -x -- "$l" "$d/x.plain.c" >/dev/null; then
+            { echo "the output has no line: $l"; cat "$d/x.plain.c"; } >"$d/why"
+            fail "$vo_name" "$d/why"
+            return 1
+        fi
+    done
+    pass "$vo_name"
+}
+
+printf '%s\nvoid f(void) {\n    var x;\n}\n' "$prelude" >"$d/x.c"
+defer_case "1: var requires an initializer" 1 \
+    "x.c:5:5: error: 'var' requires an initializer"
+
+printf '%s\nvoid f(void) {\n    var a = {1, 2};\n}\n' "$prelude" >"$d/x.c"
+defer_case "1: no brace initializer" 1 \
+    "x.c:5:13: error: 'var' cannot take a brace initializer; write the type instead"
+
+printf '%s\nstruct point { int x, y; };\nvoid f(void) {\n    var a = (struct point){1, 2};\n    (void)a;\n}\n' "$prelude" >"$d/x.c"
+defer_case "1: a compound literal is an expression" 0 ""
+
+printf '%s\nvoid f(void) {\n    var a = 1, b = 2.0;\n}\n' "$prelude" >"$d/x.c"
+defer_case "2: one variable per declaration" 1 \
+    "x.c:5:16: error: 'var' declares a single variable"
+
+printf '%s\nvoid f(int n) {\n    var *p = &n;\n}\n' "$prelude" >"$d/x.c"
+defer_case "3: no pointer declarator" 1 \
+    "x.c:5:9: error: the name after 'var' must be a plain identifier; its type comes from the initializer"
+
+printf '%s\nvoid f(void) {\n    var a[] = "x";\n}\n' "$prelude" >"$d/x.c"
+defer_case "3: no array declarator" 1 \
+    "x.c:5:10: error: the name after 'var' must be a plain identifier; its type comes from the initializer"
+
+printf '%s\nint g(void);\nvoid f(void) {\n    var h(void) = g;\n}\n' "$prelude" >"$d/x.c"
+defer_case "3: no function declarator" 1 \
+    "x.c:6:10: error: the name after 'var' must be a plain identifier; its type comes from the initializer"
+
+printf '%s\nvoid f(void) {\n    var x = x + 1;\n}\n' "$prelude" >"$d/x.c"
+defer_case "4: not in its own initializer" 1 \
+    "x.c:5:13: error: 'x' cannot appear in its own initializer"
+
+printf '%s\nstruct o { int x; };\nvoid f(struct o o) {\n    var x = o.x;\n    (void)x;\n}\n' "$prelude" >"$d/x.c"
+defer_case "4: a member with the same name is fine" 0 ""
+
+printf '%s\nvoid f(void) {\n    var u = (struct { int z; }){1};\n}\n' "$prelude" >"$d/x.c"
+defer_case "5: a type without a name" 1 \
+    "x.c:5:5: error: the type of 'u' has no name, so niu cannot write it out"
+
+printf '%s\nvoid f(int n) {\n    int a[n];\n    var p = &a;\n}\n' "$prelude" >"$d/x.c"
+defer_case "5: a variably modified type" 1 \
+    "x.c:6:5: error: the type of 'p' is a variably modified type, which niu cannot write out"
+
+printf '%s\nvoid f(void) {\n    extern var x = 1;\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: not with extern" 1 \
+    "x.c:5:5: error: 'var' cannot be used with 'extern'"
+
+printf '%s\ntypedef var x = 1;\n' "$prelude" >"$d/x.c"
+defer_case "6: not with typedef" 1 \
+    "x.c:4:1: error: 'var' cannot be used with 'typedef'"
+
+printf '%s\nvoid f(void) {\n    auto var x = 1;\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: not with auto" 1 \
+    "x.c:5:5: error: 'var' cannot be used with 'auto'"
+
+printf '%s\nvoid f(void) {\n    const var x = 1;\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: no qualifiers" 1 \
+    "x.c:5:5: error: 'var' takes the place of the type; use 'let' for a 'const' variable"
+
+printf '%s\nvoid f(void) {\n    unsigned let x = 1;\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: no type specifiers with let" 1 \
+    "x.c:5:5: error: 'let' takes the place of the type; 'let' already makes the variable 'const'"
+
+printf '%s\nvoid f(void) {\n    const let x = 1;\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: no const with let" 1 \
+    "x.c:5:5: error: 'let' takes the place of the type; 'let' already makes the variable 'const'"
+
+printf '%s\nvoid f(void) {\n    _Alignas(16) var x = 1;\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: not with _Alignas" 1 \
+    "x.c:5:5: error: 'var' cannot be used with '_Alignas'; write the type out instead"
+
+printf '%s\nvoid f(void) {\n    static var a = 1;\n    register let b = 2;\n    (void)a; (void)b;\n}\n' "$prelude" >"$d/x.c"
+defer_case "6: static and register are fine" 0 ""
+
+printf '%s\n#define V var x = 1\n' "$prelude" >"$d/x.c"
+defer_case "7: not in a macro" 1 \
+    "x.c:4:11: error: 'var' cannot be used in a macro"
+
+printf '%s\n#define ID(x) x\nint f(void) {\n    ID(var v = 1;)\n    return v;\n}\n' "$prelude" >"$d/x.c"
+var_out "7: in a macro argument it is lowered" "    ID(int v = 1;)"
+
+printf '%s\nvoid g(var x);\n' "$prelude" >"$d/x.c"
+defer_case "8: not a parameter" 1 \
+    "x.c:4:8: error: 'var' can only declare a variable"
+
+printf '%s\nstruct m { let x; };\n' "$prelude" >"$d/x.c"
+defer_case "8: not a member" 1 \
+    "x.c:4:12: error: 'let' can only declare a variable"
+
+printf '%s\nvar h(void) { return 1; }\n' "$prelude" >"$d/x.c"
+defer_case "8: not a function" 1 \
+    "x.c:4:1: error: 'var' can only declare a variable"
+
+printf '%s\nint f(void) {\n    return (var)1 + sizeof(var);\n}\n' "$prelude" >"$d/x.c"
+defer_case "8: not in a cast or sizeof" 1 \
+    "x.c:5:13: error: 'var' can only declare a variable
+x.c:5:28: error: 'var' can only declare a variable"
+
+# spec.md, constraint 9
+printf '%s\nstruct S { int a; };\nstruct S *get_s(void);\nvoid f(void) {\n    struct S { double d; };\n    var p = get_s();\n}\n' "$prelude" >"$d/x.c"
+defer_case "9: the type's name is hidden" 1 \
+    "x.c:8:5: error: the type of 'p' cannot be written here: 'struct S' means a different type in this scope
+x.c:7:12: note: 'struct S' is declared here"
+
+printf '%s\ntypedef struct { int a; } A;\nA get_a(void);\nvoid f(void) {\n    int A = 0;\n    var p = get_a();\n}\n' "$prelude" >"$d/x.c"
+defer_case "9: a hidden typedef of a struct without a tag" 1 \
+    "x.c:8:5: error: the type of 'p' cannot be written here: 'A' means a different type in this scope
+x.c:7:9: note: 'A' is declared here"
+
+printf '%s\nvoid f(void) {\n    var v = ({ struct L { int a; } t = {1}; t; });\n}\n' "$prelude" >"$d/x.c"
+defer_case "9: a name that is out of scope has no note" 1 \
+    "x.c:5:5: error: the type of 'v' cannot be written here: 'struct L' means a different type in this scope"
+
+# the fallback order (the portable sample tests it too)
+printf '%s\ntypedef struct S { int a; } S;\nS get_s(void);\nstruct T { int t; };\ntypedef struct T T_t;\nstruct T get_t(void);\ntypedef unsigned short u16;\nu16 get_u(void);\nvoid f(void) {\n    var a = get_s();\n    int S = 0, u16 = 0;\n    var b = get_s();\n    struct T { double d; };\n    var t = get_t();\n    var u = get_u();\n    (void)a; (void)b; (void)t; (void)u; (void)S; (void)u16;\n}\n' "$prelude" >"$d/x.c"
+var_out "9: typedef name, then tag, then another typedef, then the underlying type" \
+    "    S a = get_s();" "    struct S b = get_s();" "    T_t t = get_t();" "    unsigned short u = get_u();"
+
+# let's const goes next to the name
+printf '%s\nvoid handler(int);\nint grid[8][8];\nvoid f(void) {\n    let cb = handler;\n    let row = &grid[0];\n    let n = 1;\n    (void)cb; (void)row; (void)n;\n}\n' "$prelude" >"$d/x.c"
+var_out "let: const inside the declarator" \
+    "    void (*const cb)(int) = handler;" "    int (*const row)[8] = &grid[0];" "    const int n = 1;"
+
+printf '%s\nvoid f(void) {\n    int var = 3;\n    (void)var;\n}\n' "$prelude" >"$d/x.c"
+defer_case "var is a keyword in niu files" 1 \
+    "x.c:5:9: error: 'var' is a keyword in niu files and cannot be used as a name
+x.c:6:11: error: 'var' is a keyword in niu files and cannot be used as a name"
+
+printf 'struct opts { int var; int let; };\n#include <stdio.h>\n#include <niu.h>\nint f(struct opts *p) {\n    struct opts o = { .var = 1, .let = 2 };\n    let v = o.var;\n    return p->let + p -> var + v;\n}\n' >"$d/x.c"
+defer_case "after . or -> var and let are member names" 0 ""
+
+# var and let in a deferred statement: the copies have the written type,
+# and defer constraint 6 covers the names niu writes
+printf '%s\n#include <string.h>\nint f(const char *s, int bad) {\n    defer { var n = strlen(s); let p = &n; (void)p; }\n    if (bad) return 1;\n    return 0;\n}\n' "$prelude" >"$d/x.c"
+var_out "var and let in a deferred statement" \
+    "    if (bad) { int __niu_return_temp = 1; { size_t n = strlen(s); size_t *const p = &n; (void)p; } return __niu_return_temp; }"
+
+printf '%s\ntypedef struct S { int a; } S;\nS get_s(void);\nint f(int bad) {\n    defer { var p = get_s(); (void)p; }\n    {\n        int S = 0;\n        if (bad) return S;\n    }\n    return 0;\n}\n' "$prelude" >"$d/x.c"
+defer_case "defer 6: the type niu writes must mean the same at every exit" 1 \
+    "x.c:10:18: error: 'S' in this deferred statement would refer to a different declaration at this exit
+x.c:9:13: note: 'S' is declared here
+x.c:7:5: note: the 'defer' is here"
+
+# libclang's columns after a var on the same line are those of the original
+printf '%s\nvoid f(void) {\n    var a = 1; int b = a + missing;\n}\n' "$prelude" >"$d/x.c"
+defer_case "libclang's columns after a var are the original's" 1 \
+    "x.c:5:28: error: use of undeclared identifier 'missing'"
+
+# niu.h's tooling stubs: var and let as __auto_type, which gcc and clang
+# know (cl and tcc do not, see spec.md "Editor tools"). compile uses
+# -pedantic-errors, so this also checks that niu.h turns clang's
+# -Wgnu-auto-type off.
+tooling_var_c='#include <stdio.h>
+#include <string.h>
+#include <niu.h>
+
+int main(void)
+{
+    var n = strlen("abc");
+    let p = &n;
+    if (*p != 3)
+        return 1;
+    printf("ok\n");
+    return 0;
+}
+'
+for cc in $compilers; do
+    command -v "$cc" >/dev/null 2>&1 || continue
+    kind=$(compiler_kind "$cc")
+    [ "$kind" = gnu ] || continue
+    d=$(fresh_dir "niu-h-var-$(basename "$cc")")
+    printf '%s' "$tooling_var_c" >"$d/tool.c"
+    if compile "$cc" "$kind" c11 "$d/tool.c" "$d/prog$exe" "$d/log" "-I$root/include" -D__NIU_TOOLING__ &&
+        (cd "$d" && ./prog$exe) >"$d/stdout" 2>>"$d/log" &&
+        [ "$(tr -d '\r' <"$d/stdout")" = ok ]; then
+        pass "$cc: -D__NIU_TOOLING__ compiles var and let as __auto_type with -pedantic-errors"
+    else
+        fail "$cc: var and let do not compile with -D__NIU_TOOLING__" "$d/log"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+echo
 echo "passed: $passes, failed: $fails, skipped: $skips"
 [ $fails = 0 ]
