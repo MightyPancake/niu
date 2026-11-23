@@ -123,6 +123,7 @@ Status: **TODO** means the feature is not specified yet, **Draft** means its cha
 | [`defer`](#defer-statement) | [Done](#defer-statement) | Run a cleanup statement on every exit from the current block. Includes `defer_now`, which runs the pending cleanups early, right before `exit` or `abort`. |
 | [`var`](#var-and-let) | [Done](#var-and-let) | Declare a variable whose type comes from its initializer. |
 | [`let`](#var-and-let) | [Done](#var-and-let) | Like `var`, but the variable is `const`. |
+| [`%v`](#automatic-format-specifier-v) | Specified | Print any value in a printf-style call, with a format generated from its type. |
 | [Generic types](#generic-types) | TODO | Define a type template once and use it with different types. |
 | [`__mangle`](#__mangle) | TODO | Turn a type into a name fragment for building identifiers. |
 | [Variable-length arrays](#variable-length-arrays) | TODO | VLAs in niu code without VLAs in the output. |
@@ -774,6 +775,159 @@ Wrong uses of the keywords themselves:
 | Situation | Message |
 |---|---|
 | A keyword used as a name (`int var = 3;`) | `'var' is a keyword in niu files and cannot be used as a name` |
+
+### Automatic format specifier (%v)
+In a call to a `printf`-style function, the `%v` conversion prints its argument in a form niu generates from the argument's type. For example:
+
+```c
+typedef struct my_struct {
+    int a;
+    char b[10];
+} my_struct;
+
+void foo(void) {
+    my_struct s = (my_struct){.a = 42};
+    strcpy(s.b, "hello");
+    printf("%v\n", s);
+}
+```
+
+prints `(my_struct){.a = 42, .b = "hello"}`.
+
+#### Constraints
+A program that breaks any of these rules is rejected with an error.
+
+1. **`%v` only works where niu can see the type of every variadic argument.** That means calls to the standard `printf` family that take `...`: `printf`, `fprintf`, `sprintf` and `snprintf`, and the bounds-checked `printf_s`, `fprintf_s`, `sprintf_s` and `snprintf_s` from C11 Annex K, wherever the C library declares them (MSVC has most of them, glibc has none). niu knows these by name, when they are declared in a system header, because some C libraries (MSVC's among them) do not mark them with format attributes. It also covers calls to any function declared with `__attribute__((format(printf, m, n)))` where `n` is not 0, that is, a function that takes `...`. A `%v` in the format string of a function that takes a `va_list` (`vprintf`, or `format(printf, m, 0)`) or of a `scanf`-style function (`format(scanf, ...)`) is an error.
+2. **The format string must be a string literal.** Adjacent literals (`"x = " "%v"`) count as one. As in printf, `%%` is a literal percent sign, so `"%%v"` prints `%v` and is left as it is. niu cannot see a `%v` in a format string built at run time. The C library would get an unknown conversion there, which is undefined behavior, so don't build one.
+3. **Every `%v` needs an argument.** A `%v` with no matching argument is an error. A `*` width or precision uses up an argument too, as in printf, so `printf("%*v", w, s)` prints `s` with width `w`, and `printf("%*v", s)` is an error.
+4. **The argument must have a type `%v` can print.** Those are the types listed under Output. `_Complex` types are an error. So are `_Atomic` structs and unions, at any depth, because C does not allow reading the members of one.
+5. **A struct, union or enum argument must have a type declared at file scope, with a name.** niu prints it with a function at file scope (see Lowering), which has to name the type as a parameter. A type declared inside a function, or an unnamed type without a typedef name, is an error. This applies only to the argument's own type: its members can have unnamed types.
+6. **`%v` cannot come from a macro definition.** niu leaves macros as written, so it cannot rewrite a `%v` that is in the body of a `#define` (`#define FMT "%v\n"`), or an argument that is. A call built by a macro is fine when the format literal and the argument are written in the file, as macro arguments, and each of them appears once in the expansion. That covers the usual logging macro:
+   ```c
+   #define LOG(...) fprintf(stderr, __VA_ARGS__)
+   LOG("got %v\n", s);   /* fine: "got %v\n" and s are both in the file */
+   ```
+   A macro that uses such an argument twice, or turns it into a string with `#`, is an error.
+7. **A `%v` can only have a width, the `-` flag and a precision.** The form is `%[-][width][.precision]v`, where the width and the precision are each a number or `*`: `%20v`, `%-*v`, `%.4v`, `%-20.*v`. The other flags (`+`, space, `#`, `0`), length modifiers (`hh`, `l`, `z`, `L` and the rest, which have no use because niu knows the type) and positional arguments (`%1$v`) are errors. Allowing some of them later only accepts programs that were errors before, so it breaks no existing code.
+8. **`<stdio.h>` must be included before the first function that uses `%v`.** The generated functions format values with `snprintf` (see Lowering), and they go right before that function. A file that calls `printf` includes `<stdio.h>` anyway, but one that only uses `%v` with its own printf-style function might not.
+
+#### Output
+The output depends on the type of the argument as niu sees it before the default argument promotions, so a `char`, `bool` or enum argument still counts as that type and not as the `int` it is promoted to. The same rules apply at every depth, to the members of a struct and the elements of an array.
+
+- **Integers** print in decimal: `42`, `-7`.
+- **`char`, `signed char` and `unsigned char`** print as a number, followed by the character in quotes and parentheses when it is a visible ASCII character (`0x21` to `0x7E`): `97 ('a')`, but `10` for a newline. The number is the value of the type, so the byte `0xC8` prints as `200` for an `unsigned char` and as `-56` for a `signed char`, and for a plain `char` it depends on whether `char` is signed on the target (it is on x86, so `-56` there).
+- **`bool` (`_Bool`)** prints as `true` or `false`. niu reads a `bool` through its bytes, as an `unsigned char`, because a `bool` whose byte is not 0 or 1 is undefined behavior to read, and compilers assume it never happens. That byte can be anything in a union member that is not the active one, or in a member that was never set. 0 prints as `false`, 1 as `true`, and any other value as a cast: `(bool)2`.
+- **Floating types** (`float`, `double`, `long double`) print in fixed notation with 2 decimal places by default: `3.14`. A precision before the conversion letter overrides that for every floating value the `%v` prints, at any depth: `%.4v` prints `3.1416`. The precision applies only to floating values. As in printf, a `.` with no number means a precision of 0: `%.v` prints `3`. Infinity prints as `inf` or `-inf`, and a NaN as `nan`. niu prints these itself instead of leaving them to the C library, which spells them differently on different targets (`-nan(ind)` on Windows, for example). With MinGW, whose default `snprintf` (from the Microsoft C library) cannot print a `long double`, the generated code calls MinGW's own `__mingw_snprintf` instead, which `<stdio.h>` always declares there.
+- **Pointers**, including `char *` and pointers to functions, are never followed. They print as `0x` followed by the address in lowercase hex: `0x7ffd5e8c1a40`, and `0x0` for a null pointer. The address is converted with a cast to `unsigned long long`, which C allows for every pointer type, including pointers to functions, which cannot be converted to `void *`. That type has at least 64 bits, enough for an address on every target niu supports, and it needs no header, unlike `uintptr_t`.
+- **Enums** print the name of the enumerator with the stored value:
+  ```c
+  typedef enum my_enum {
+      my_value_0,
+      my_value_1,
+      my_value_2,
+      my_value_3
+  } my_enum;
+
+  void foo(void) {
+      my_enum e = my_value_2;
+      printf("%v\n", e);   /* prints my_value_2, not 2 */
+  }
+  ```
+  When no enumerator has the stored value, the value prints as a cast: `(my_enum)7`. When several enumerators share the value, the first one declared is printed.
+
+  An enumerator written directly as the argument (`printf("%v\n", my_value_2);`) prints `2`, because in C an enumerator constant has type `int`, not the enum type. For the same reason `printf("%v", true)` prints `1` under C99 to C17, where `true` is a macro for `1`.
+- **Structs** print the name of the type in parentheses, followed by every member in curly braces, in declaration order: `(my_struct){.a = 42, .b = "hello"}`. A bit-field prints like a value of its declared type, so a `bool` bit-field prints as `true` or `false` and an enum bit-field as an enumerator.
+- **Unions** print the same way, with every member, as if each were the active one: `(my_union){.i = 42, .f = 0.00}`. C99 allows reading any member of a union, so this is well defined, but only the active member's value is meaningful. Pointers are never followed anyway, so a member that is not the active one cannot crash.
+- **Arrays** that are struct or union members print their elements in curly braces: `{1, 2, 3}`, and `{{1, 2}, {3, 4}}` for an array of arrays. A flexible array member has no known length and prints as `{...}`. An array passed directly as the argument has already become a pointer, so it prints as an address.
+- **`char` arrays** print as a string in double quotes, up to the first null character or the end of the array, whichever comes first, so an array without a terminating null never reads past its end. Characters that are not visible ASCII are escaped as in C: `\n`, `\t`, `\"`, `\\`, and `\x` with two hex digits for the rest. Arrays of `signed char` and `unsigned char` (such as `uint8_t`) are data, not text, so they print as arrays of numbers.
+
+**A width pads the whole output**, the same as for `%s`: with spaces on the left, or on the right with `-`. `printf("[%-24v]", s)` prints `[(my_struct){.a = 42, .b = "hello"}]` unchanged, since it is longer than 24 bytes, and `printf("[%6v]", e)` with `int e = 42` prints `[    42]`. The width counts bytes. With `*` it comes from an `int` argument before the value, as in printf.
+
+**The name of a type** is chosen by the same steps as for `var` (see "Writing the type" under `var` and `let`), with visibility taken at file scope, where the generated function is (see Lowering). The name is the typedef name the type has, else its tag (`(struct S){...}`, `(enum E)7`), else another typedef name for the same type at file scope. Every call that prints a type therefore prints the same name, even where a local declaration hides that name.
+
+**Unnamed types** (an unnamed `struct`, `union` or `enum`) print the keyword in place of the name, without parentheses: `struct{.a = 1}`, `union{.i = 42, .f = 0.00}`, and `enum 7` for a value with no enumerator. Parentheses only ever surround a name. An anonymous struct or union member prints the same way in its place among the members: `(S){.a = 1, struct{.x = 2, .y = 3}}`.
+
+#### Length limit
+**The output of one `%v` is at most `NIU_V_LIMIT` bytes, including the terminating null.** The default is 2048. Change it when compiling the generated C, with `-DNIU_V_LIMIT=4096` on the command line or a `#define NIU_V_LIMIT 4096` before the first function in the file that uses `%v`. It must be a plain integer constant of at least 64, because the generated C uses it in `#if` and as an array size. The limit is per `%v`, not per call: `printf("%v %v", a, b)` can use twice as much stack. A buffer lives until the end of its block (see Lowering), so niu puts each call that is a whole statement in a block of its own, and the compiler can reuse the space for the next one. A call that is part of a declaration, such as `int n = printf("%v", s);`, keeps its buffer until the end of the enclosing block. A smaller limit helps on targets with little stack and in deeply recursive code.
+
+**Most output never reaches the limit.** niu knows the longest output each type can produce, for the configuration it is run with: integers, pointers and enum names have a fixed maximum length, a `char` array of length n takes at most 4n + 2 bytes (every character escaped as `\xNN`, plus the quotes), and so on. A `%v` whose longest output fits uses a buffer of exactly that size, so it is never cut, and a small type uses a small buffer however large the limit is. Only types whose longest output is larger than the limit can be cut, for example a struct with a `char name[1024]` member, a `long double` (whose largest value has over 4900 digits in fixed notation on x86), or a `%.*v` precision, which niu cannot know in advance.
+
+**Output that does not fit is cut, and the cut is marked.** Everything that fits is printed. At the cut, niu writes `...` and then closes everything still open, so the output keeps its shape:
+- an open string is closed with `..."`;
+- each open pair of braces, from the innermost one out, is closed with `, ...}`, or `...}` when nothing has been written inside it yet.
+
+```
+(my_struct){.a = 42, .b = "hel...", ...}
+(outer){.id = 7, .inner = (my_struct){.a = 42, ...}, ...}
+```
+
+A number, an enum name, a `true` or `false`, an address or an escape sequence is never split: if it does not fit, it is left out and the cut comes before it. A number cut in half would read as a different, smaller number. Room for the closing text is kept free from the start, so the closing text always fits. When even the opening of the value does not fit (a type nested so deeply that the closing text alone is larger than the limit), the output is only `...`.
+
+Output that fits is printed exactly as described under Output, with no `...`. Because the cut output is still an ordinary string, the rest of the format string, the return value of the call and the truncation of `snprintf` all work as usual.
+
+#### Lowering
+Each `%v` in the format string becomes `%s`, and its argument becomes a call to a function niu generates for the argument's type, which formats the value into a buffer and returns the buffer:
+```c
+printf("x = %v\n", s);
+```
+becomes
+```c
+printf("x = %s\n", __niu_v_my_struct((char[(N) < NIU_V_LIMIT ? (N) : NIU_V_LIMIT]){0}, (N) < NIU_V_LIMIT ? (N) : NIU_V_LIMIT, 2, s));
+```
+where niu writes the longest output of the type, plus one, as the number in place of `N`. The arguments of `__niu_v_my_struct` are the buffer, its size, the precision for floating values (2, or the precision given as `%.4v`) and the value.
+- **The buffer is a compound literal.** In C99 it lives until the end of the enclosing block, so it is still valid while `printf` reads it. Its size is the smaller of the longest output and `NIU_V_LIMIT`, an integer constant expression, so the compound literal is an ordinary array and not a variable-length one.
+- **It stays one call to the same function.** The other arguments, the order they are evaluated in and the return value are unchanged, and every argument is still evaluated once.
+- **A call that is a whole statement gets braces.** A compound literal lives until the end of the block it is in, and the compiler cannot reuse its space while it lives, since the called function might have kept the pointer. Ten `%v` calls in one function body would hold ten buffers at once. So niu wraps the statement in `{ }`, on the same line: `printf("%v\n", s);` becomes `{ printf("%s\n", __niu_v_my_struct(...)); }`, and `if (x) printf("%v", s);` becomes `if (x) { printf("%s", ...); }`, which means the same. A call inside a larger expression is wrapped as the whole statement: `n += printf("%v", s);` becomes `{ n += printf(...); }`. A declaration is never wrapped, because braces would change the scope of what it declares. Neither is the last statement of a GNU statement expression (`({ ...; printf("%v", s); })`), because its value is the value of the whole expression.
+- **`%.*v`** takes its precision from an `int` argument, which moves into the call to the generated function: `printf("%.*v", p, s)` becomes `printf("%s", __niu_v_my_struct((char[NIU_V_LIMIT]){0}, NIU_V_LIMIT, p, s))`. The buffer is always `NIU_V_LIMIT` bytes, because the longest output depends on `p`.
+- **A width and the `-` flag stay on the `%s`**, so the C library pads the output and niu does not have to: `%-20v` becomes `%-20s`, and `%*v` becomes `%*s`, with the width argument left where it is. The precision is never put on the `%s`, where it would cut the string: it goes to the generated function instead. So `printf("%-*.*v", w, p, s)` becomes `printf("%-*s", w, __niu_v_my_struct((char[NIU_V_LIMIT]){0}, NIU_V_LIMIT, p, s))`.
+- **Arguments of a type without members** (integers, `char`, `bool`, floating types, pointers) use generated functions in the same way, named after the type: `__niu_v_int`, `__niu_v_double`, `__niu_v_ptr`.
+
+**The generated functions are `static` and go at file scope**, before the first function in the output file that uses them. There is one per type per output file, plus one for each struct, union or array type inside it. The first one in each output file comes after the default limit:
+```c
+#ifndef NIU_V_LIMIT
+#define NIU_V_LIMIT 2048
+#endif
+#if NIU_V_LIMIT < 64
+#error "NIU_V_LIMIT must be at least 64"
+#endif
+```
+A `#line` directive after the generated code keeps the line numbers of the function that follows. **Names.** A generated function is named after the type, with the kind of tag in the name so that `struct S` and a typedef `S` of a different type do not collide:
+
+| Type | Function |
+|---|---|
+| `struct S`, `union U`, `enum E` | `__niu_v_struct_S`, `__niu_v_union_U`, `__niu_v_enum_E` |
+| a typedef name `T` (of a struct, union or enum) | `__niu_v_T` |
+| a type without members | `__niu_v_int`, `__niu_v_unsigned_long_long`, `__niu_v_long_double`, `__niu_v_bool`, `__niu_v_ptr` |
+| an array member | `__niu_v_<element>_<length>`, for example `__niu_v_int_8` |
+
+A typedef of a type without members, such as `size_t`, uses the function of the underlying type.
+
+**Guards.** A header can be included by several niu files, and a file can print a type that a header it includes already prints. So in every output file, each generated function is wrapped in `#ifndef __niu_v_<name>_defined` and `#define __niu_v_<name>_defined`, and a translation unit never gets the same function twice. The generated functions call only `snprintf` (`__mingw_snprintf` with MinGW), so the output stays C99 and needs no niu runtime and no header but `<stdio.h>`. They read the bytes of a `bool` through an `unsigned char` lvalue, which C allows for any object, so they do not need `memcpy` either.
+
+#### Editor tools
+Clang checks the format strings of printf-style functions, and `%v` is not a conversion it knows, so it would report `invalid conversion specifier 'v'` [`-Wformat-invalid-specifier`] on every `%v`.
+- **niu turns this warning off while it reads a niu file**, and checks each `%v` itself (constraints 1 to 8). The rest of the format string is still checked, by the C compiler on the lowered call: there the `%v` is a `%s` with a `char *` argument, so `-Wformat` checks every other conversion as usual, and `#line` points its warnings at the original.
+- **Under `__NIU_TOOLING__`, `niu.h` turns it off too**, with `#pragma clang diagnostic ignored "-Wformat-invalid-specifier"`, only when `__clang__` is defined. Editors based on Clang then show no warning for `%v`. A real mistake with another conversion on a line with a `%v` may not show in the editor either, but the build still reports it. The pragma covers the rest of the translation unit, so it also hides invalid conversions in other format strings in the editor. GCC has no separate warning for this, so with GCC-based tools the warning stays.
+
+#### Diagnostics
+| Constraint | Message |
+|---|---|
+| 1 | `'%v' cannot be used with 'vprintf': the types of a 'va_list' are not known`, `'%v' cannot be used in a scanf format string` |
+| 3 | `'%v' has no matching argument` |
+| 4 | `'%v' cannot print a value of type '_Complex double'` |
+| 5 | `'%v' cannot print 'struct L': it is declared inside a function`, `'%v' cannot print a value of an unnamed type; give it a typedef name` |
+| 6 | `'%v' cannot be used in a macro definition`, `'%v' cannot be used here: the macro 'LOG' uses its argument more than once` |
+| 7 | `'%v' cannot take the '+' flag; only a width, '-' and a precision are allowed`, `'%v' cannot take a length modifier: the type of the argument is already known`, `'%v' cannot take a positional argument` |
+| 8 | `'%v' needs <stdio.h>; include it before 'foo'`, with a note at the function |
+
+Each message names the function that was called and the type as it is written in the source. The error is reported at the `%v` in the format string, with a note at the argument for constraints 4 and 5, a note at the macro for constraint 6, and a note at the function for constraint 8. Constraint 2 has no diagnostic, because niu cannot see a format string built at run time.
+
+**`%v` passed to an unknown function (warning, `-Wniu-v-no-format`).** A string literal with a `%v` in it, passed as an argument to a variadic function that constraint 1 does not cover, is left unchanged. If the function hands it to the C library as a format string, that is undefined behavior at run time, so niu warns:
+```
+main.c:8:12: warning: '%v' in a string passed to 'my_log', which niu does not know as a printf-style function [-Wniu-v-no-format]
+main.c:3:6: note: add '__attribute__((format(printf, 1, 2)))' to 'my_log' to use '%v' with it
+```
+The note gives the positions of the literal and of the `...` in that function. Functions that are not variadic never get this warning, so `puts("%v")` prints `%v` without complaint.
 
 ### Generic types
 TODO: define a type template once and use it with different types:
