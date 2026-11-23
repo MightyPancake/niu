@@ -123,7 +123,7 @@ Status: **TODO** means the feature is not specified yet, **Draft** means its cha
 | [`defer`](#defer-statement) | [Done](#defer-statement) | Run a cleanup statement on every exit from the current block. Includes `defer_now`, which runs the pending cleanups early, right before `exit` or `abort`. |
 | [`var`](#var-and-let) | [Done](#var-and-let) | Declare a variable whose type comes from its initializer. |
 | [`let`](#var-and-let) | [Done](#var-and-let) | Like `var`, but the variable is `const`. |
-| [`%v`](#automatic-format-specifier-v) | Specified | Print any value in a printf-style call, with a format generated from its type. |
+| [`%v`](#automatic-format-specifier-v) | [Done](#automatic-format-specifier-v) | Print any value in a printf-style call, with a format generated from its type. |
 | [Generic types](#generic-types) | TODO | Define a type template once and use it with different types. |
 | [`__mangle`](#__mangle) | TODO | Turn a type into a name fragment for building identifiers. |
 | [Variable-length arrays](#variable-length-arrays) | TODO | VLAs in niu code without VLAs in the output. |
